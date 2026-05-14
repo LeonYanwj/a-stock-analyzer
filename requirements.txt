@@ -1,0 +1,6 @@
+akshare
+tushare
+pandas
+numpy
+matplotlib
+mplfinance
