@@ -9,21 +9,24 @@
 import numpy as np
 import pandas as pd
 
+from pattern_recognizer import compute_pattern_score
+
 
 # 因子权重（正向：越大越好；权重为正表示该因子值越大越倾向于选入）
 FACTOR_WEIGHTS = {
-    "ep_ttm":       0.5,   # 1/PE_TTM，价值（权重降低，避免单一估值霸榜）
-    "bp":           1.0,   # 1/PB，价值
-    "mom_30":       0.8,   # 过去 30 日动量（约 1.5 个月）
-    "reversal_5":   0.5,   # 短期反转（5日收益取负）
-    "small_size":   0.6,   # 小市值溢价（流通市值取负）
-    "low_vol":      0.6,   # 低波动（20日波动率取负）
-    "liquidity":    0.3,   # 20日均换手率（避免选到流动性差的）
-    "main_inflow":  1.0,   # 主力资金近 N 日净流入额（捡筹码信号）
+    "ep_ttm":        0.5,   # 1/PE_TTM，价值（权重降低，避免单一估值霸榜）
+    "bp":            1.0,   # 1/PB，价值
+    "mom_30":        0.8,   # 过去 30 日动量（约 1.5 个月）
+    "reversal_5":    0.5,   # 短期反转（5日收益取负）
+    "small_size":    0.6,   # 小市值溢价（流通市值取负）
+    "low_vol":       0.6,   # 低波动（20日波动率取负）
+    "liquidity":     0.3,   # 20日均换手率（避免选到流动性差的）
+    "main_inflow":   1.0,   # 主力资金近 N 日净流入额（捡筹码信号）
     "inflow_ratio": 0.8,   # 净流入占资金总进出比 (in-out)/(in+out)
-    "macd_hist":    0.6,   # MACD 柱状值 (DIF-DEA)，正=金叉态
-    "macd_slope":   0.4,   # MACD 柱状值近 5 日变化（避开"快死叉"）
-    "lxsz":         0.5,   # 量价齐升连涨天数（同花顺榜单，未上榜=0）
+    "macd_hist":     0.6,   # MACD 柱状值 (DIF-DEA)，正=金叉态
+    "macd_slope":    0.4,   # MACD 柱状值近 5 日变化（避开"快死叉"）
+    "lxsz":          0.5,   # 量价齐升连涨天数（同花顺榜单，未上榜=0）
+    "pattern_score": 0.5,   # 日K形态分（锤子/吞没/黄昏之星等，含量能+位置过滤）
 }
 
 
@@ -133,19 +136,25 @@ def compute_all_factors(panel: pd.DataFrame, asof_date: pd.Timestamp) -> pd.Data
     else:
         lxsz = pd.Series(dtype=float)
 
+    # 日 K 形态分（对每只股票算 pattern_score）
+    pattern_score = panel.groupby("ts_code", sort=False).apply(
+        lambda g: compute_pattern_score(g, lookback=5)
+    )
+
     factors = pd.DataFrame({
-        "ep_ttm":       ep_ttm,
-        "bp":           bp,
-        "mom_30":       mom_30,
-        "reversal_5":   reversal_5,
-        "small_size":   small_size,
-        "low_vol":      low_vol,
-        "liquidity":    liquidity,
-        "main_inflow":  main_inflow,
-        "inflow_ratio": inflow_ratio,
-        "macd_hist":    macd_hist,
-        "macd_slope":   macd_slope,
-        "lxsz":         lxsz,
+        "ep_ttm":        ep_ttm,
+        "bp":            bp,
+        "mom_30":        mom_30,
+        "reversal_5":    reversal_5,
+        "small_size":    small_size,
+        "low_vol":       low_vol,
+        "liquidity":     liquidity,
+        "main_inflow":   main_inflow,
+        "inflow_ratio":  inflow_ratio,
+        "macd_hist":     macd_hist,
+        "macd_slope":    macd_slope,
+        "lxsz":          lxsz,
+        "pattern_score": pattern_score,
     })
     factors.index.name = "ts_code"
     return factors

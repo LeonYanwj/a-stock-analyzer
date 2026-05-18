@@ -154,7 +154,7 @@ def main():
     cols = ["name", "score", "valid_factors",
             "ep_ttm", "bp", "mom_30", "reversal_5", "small_size", "low_vol", "liquidity",
             "main_inflow", "inflow_ratio", "macd_hist", "macd_slope", "lxsz",
-            "news_score", "news_bonus"]
+            "pattern_score", "news_score", "news_bonus"]
     out = out[[c for c in cols if c in out.columns]]
 
     os.makedirs("output", exist_ok=True)

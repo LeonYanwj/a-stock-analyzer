@@ -70,9 +70,20 @@ def make_mock_panel(ts_codes, n_days=N_DAYS):
     for i, tc in enumerate(ts_codes):
         rets = np.random.normal(base_drift[i], 0.02, n_days)
         close = 10 * np.exp(np.cumsum(rets))
+        # 由 close 派生 OHLC（模拟日内波动，方便 pattern_recognizer 检测形态）
+        intra_pct = np.random.uniform(0.005, 0.025, n_days)  # 日内振幅 0.5%~2.5%
+        high = close * (1 + intra_pct)
+        low = close * (1 - intra_pct)
+        # open 在 [low, high] 之间随机
+        open_ratio = np.random.uniform(0, 1, n_days)
+        open_ = low + (high - low) * open_ratio
+
         frames.append(pd.DataFrame({
             "ts_code": tc,
             "trade_date": dates,
+            "open": open_,
+            "high": high,
+            "low": low,
             "close": close,
             "pct_chg": rets * 100,
             "vol": np.random.lognormal(15, 0.5, n_days),

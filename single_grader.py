@@ -18,7 +18,7 @@ import pandas as pd
 DIM_FACTORS = {
     "tech": {
         "label": "量价面",
-        "factors": ["mom_30", "reversal_5", "low_vol", "liquidity", "lxsz"],
+        "factors": ["mom_30", "reversal_5", "low_vol", "liquidity", "lxsz", "pattern_score"],
     },
     "value": {
         "label": "价值面",
@@ -174,6 +174,17 @@ def score_lxsz(v):
     return 4, f"量价齐升连涨 {int(v)} 天（上榜）"
 
 
+def score_pattern_score(v):
+    """日 K 形态综合分（含位置+量能确认），范围约 -3 ~ +3"""
+    if v is None or pd.isna(v):
+        return 3, "无明显形态信号"
+    if v >= 2.0:    return 5, f"强看涨形态 (分 {v:+.2f})"
+    if v >= 0.8:    return 4, f"看涨形态 (分 {v:+.2f})"
+    if v >= -0.8:   return 3, f"形态中性 (分 {v:+.2f})"
+    if v >= -2.0:   return 2, f"看跌形态 (分 {v:+.2f})"
+    return 1, f"强看跌形态 (分 {v:+.2f})"
+
+
 def score_news_score(v):
     """综合消息面分数（新闻+公告+研报加权后），约 -3 ~ +3"""
     if v is None or pd.isna(v):
@@ -191,6 +202,7 @@ SCORERS = {
     "low_vol":         score_low_vol,
     "liquidity":       score_liquidity,
     "lxsz":            score_lxsz,
+    "pattern_score":   score_pattern_score,
     "pe_ttm":          score_pe,
     "pb":              score_pb,
     "roe":             score_roe,

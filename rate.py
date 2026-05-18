@@ -23,6 +23,7 @@ from data.fetcher import DataFetcher
 from single_grader import grade_single
 from news_scorer import compute_news_score
 from strategies import get_dim_weights, list_strategies
+from pattern_recognizer import compute_pattern_score, list_patterns
 
 
 def normalize_code(code: str) -> str:
@@ -90,6 +91,17 @@ def main():
     print(f"      {len(daily)} 行日线")
 
     factor_values = compute_tech_factors(daily)
+
+    # 日K形态分（基于同一份日线）
+    pattern = compute_pattern_score(daily, lookback=5)
+    factor_values["pattern_score"] = pattern
+    hits = list_patterns(daily, lookback=5)
+    if hits:
+        print(f"      形态命中: " + ", ".join(
+            f"{d} {n}({dr},{v})" for d, n, dr, v in hits
+        ))
+    else:
+        print(f"      最近 5 日无明显形态信号")
 
     # ---- 2a) 估值（PE/PB）：单股接口 ak.stock_a_indicator_lg ----
     print(f"  [2a] 拉取估值指标（PE/PB）...")
