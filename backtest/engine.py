@@ -1,16 +1,29 @@
 import pandas as pd
 import numpy as np
-from config import DEFAULT_COMMISSION, DEFAULT_SLIPPAGE, DEFAULT_INITIAL_CAPITAL
+from config import (
+    DEFAULT_COMMISSION,
+    DEFAULT_MIN_COMMISSION,
+    DEFAULT_SLIPPAGE,
+    DEFAULT_INITIAL_CAPITAL,
+)
 from backtest.metrics import calculate_metrics
 
 
 class BacktestEngine:
     """回测引擎"""
 
-    def __init__(self, initial_capital=None, commission=None, slippage=None):
+    def __init__(self, initial_capital=None, commission=None, slippage=None,
+                 min_commission=None):
         self.initial_capital = initial_capital or DEFAULT_INITIAL_CAPITAL
         self.commission = commission or DEFAULT_COMMISSION
         self.slippage = slippage or DEFAULT_SLIPPAGE
+        self.min_commission = (
+            DEFAULT_MIN_COMMISSION if min_commission is None else min_commission
+        )
+
+    def _fee(self, amount: float) -> float:
+        # 单笔佣金 = max(成交金额 × 佣金率, 最低佣金)
+        return max(amount * self.commission, self.min_commission)
 
     def run(self, df, signals):
         """执行回测
@@ -21,7 +34,7 @@ class BacktestEngine:
             result: 包含回测结果的字典
         """
         capital = self.initial_capital
-        position = 0  # 持仓股数
+        position = 0
         shares = 0
         trades = []
         portfolio_values = []
@@ -32,37 +45,47 @@ class BacktestEngine:
             signal = signals.iloc[i]
 
             if signal == 1 and position == 0:
-                # 买入：用全部资金买入
+                # 买入：在保留最低佣金后用剩余资金按手数取整
                 buy_price = price * (1 + self.slippage)
-                shares = int(capital / (buy_price * (1 + self.commission)) / 100) * 100
+                budget = capital - self.min_commission
+                shares = int(budget / buy_price / 100) * 100
                 if shares > 0:
-                    cost = shares * buy_price * (1 + self.commission)
+                    amount = shares * buy_price
+                    fee = self._fee(amount)
+                    cost = amount + fee
+                    # 边界保护：若整百股仍超出现金，减一手再试
+                    if cost > capital and shares >= 100:
+                        shares -= 100
+                        amount = shares * buy_price
+                        fee = self._fee(amount)
+                        cost = amount + fee
+                if shares > 0:
                     capital -= cost
                     position = 1
-                    trades.append(
-                        {
-                            "date": date,
-                            "action": "BUY",
-                            "price": buy_price,
-                            "shares": shares,
-                            "cost": cost,
-                        }
-                    )
+                    trades.append({
+                        "date": date,
+                        "action": "BUY",
+                        "price": buy_price,
+                        "shares": shares,
+                        "fee": fee,
+                        "cost": cost,
+                    })
 
             elif signal == -1 and position == 1:
                 # 卖出：清仓
                 sell_price = price * (1 - self.slippage)
-                revenue = shares * sell_price * (1 - self.commission)
+                amount = shares * sell_price
+                fee = self._fee(amount)
+                revenue = amount - fee
                 capital += revenue
-                trades.append(
-                    {
-                        "date": date,
-                        "action": "SELL",
-                        "price": sell_price,
-                        "shares": shares,
-                        "revenue": revenue,
-                    }
-                )
+                trades.append({
+                    "date": date,
+                    "action": "SELL",
+                    "price": sell_price,
+                    "shares": shares,
+                    "fee": fee,
+                    "revenue": revenue,
+                })
                 shares = 0
                 position = 0
 
