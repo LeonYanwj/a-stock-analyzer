@@ -26,21 +26,38 @@ python main.py
 
 ```
 a-stock-analyzer/
-├── main.py              # 入口，串联完整流程
-├── config.py            # Tushare token、回测参数
+├── main.py              # 单股回测入口（MA 交叉策略）
+├── screen.py            # 全市场多因子选股入口
+├── test_mock.py         # mock 数据测试，验证选股流程
+├── config.py            # 配置（被 .gitignore 忽略，复制 config.example.py 使用）
+├── universe.py          # 沪深主板股票池筛选
+├── selector.py          # 因子打分与排序
 ├── data/
-│   └── fetcher.py       # 行情数据获取 + 本地 CSV 缓存
+│   └── fetcher.py       # 行情数据获取（AKShare 后端）+ CSV 缓存
 ├── analysis/
 │   └── indicators.py    # MA / EMA / MACD / RSI / KDJ / BOLL
 ├── strategy/
 │   ├── base.py          # 策略抽象基类
 │   └── ma_cross.py      # 均线交叉策略
+├── factors/
+│   └── compute.py       # 价值/动量/反转/规模/低波/流动性 7 因子
 ├── backtest/
 │   ├── engine.py        # 回测引擎（手续费、滑点、全仓买卖）
 │   └── metrics.py       # 收益率、回撤、夏普、胜率
 └── utils/
     └── plot.py          # 蜡烛图、净值曲线
 ```
+
+## 多因子选股
+
+筛选沪深主板（剔除创业板/科创板/北交所/ST），打分 7 个因子选 Top N：
+
+```bash
+python screen.py --limit 50    # 试跑 50 只
+python screen.py               # 全部主板（~3000 只，首跑 25-40 分钟）
+```
+
+输出 `output/picks_YYYYMMDD.csv`。因子权重在 `factors/compute.py` 顶部可调。
 
 ## 扩展策略
 
