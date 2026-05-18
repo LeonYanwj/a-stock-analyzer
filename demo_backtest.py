@@ -4,12 +4,15 @@
 快速验证回测引擎参数（初始资金 / 佣金 / 不免5 / 滑点）的效果。
 
 用法:
-    python demo_backtest.py
+    python demo_backtest.py                    # 默认 MA5xMA20
+    python demo_backtest.py --short 20 --long 60
+    python demo_backtest.py --code 000001.SZ --short 10 --long 30
 """
 import sys
 import io
 import os
 import glob
+import argparse
 
 if sys.stdout.encoding and sys.stdout.encoding.lower() != "utf-8":
     sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8")
@@ -44,17 +47,27 @@ def load_cache(path: str) -> pd.DataFrame:
 
 
 def main():
-    cache_path = find_cache_csv("000001.SZ")
+    parser = argparse.ArgumentParser(description="离线回测演示（MA 交叉策略）")
+    parser.add_argument("--code", default="000001.SZ", help="股票代码")
+    parser.add_argument("--short", type=int, default=5, help="短周期 MA（默认 5）")
+    parser.add_argument("--long", type=int, default=20, help="长周期 MA（默认 20）")
+    args = parser.parse_args()
+
+    if args.short >= args.long:
+        parser.error("--short 必须小于 --long")
+
+    cache_path = find_cache_csv(args.code)
     df = load_cache(cache_path)
 
     print("=" * 60)
-    print(f"离线回测演示  缓存: {os.path.basename(cache_path)}")
+    print(f"离线回测演示  策略: MA{args.short} × MA{args.long}")
+    print(f"缓存: {os.path.basename(cache_path)}")
     print(f"数据范围: {df['trade_date'].min().date()} ~ "
           f"{df['trade_date'].max().date()}  ({len(df)} 行)")
     print("=" * 60)
 
     df = add_all_indicators(df)
-    strategy = MACrossStrategy(short_period=5, long_period=20)
+    strategy = MACrossStrategy(short_period=args.short, long_period=args.long)
     signals = strategy.generate_signals(df)
 
     engine = BacktestEngine()
