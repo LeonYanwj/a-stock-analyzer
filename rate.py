@@ -1,15 +1,10 @@
-"""个股多维度评级入口（独立于 screen.py）
+"""单股量化评级（按经验阈值评分，不依赖全市场参照）
 
 用法:
-    python rate.py 600487                    # 评级指定股票（自动补全交易所）
-    python rate.py 600487.SH 000001.SZ       # 多只
-    python rate.py --top 30                  # 全市场跑完输出 Top 30（按综合分排序）
-    python rate.py --all                     # 全市场全部输出
+    python rate.py 002028              # 评级 002028
+    python rate.py 600487 --no-flow    # 跳过资金面（不拉全市场快照，更快）
 
-评级是横截面概念：内部总是以全市场主板（约 3000 只）为参照计算分位数，
-即使你只评几只股票，它们的等级也是相对于全市场的位置。
-
-输出: output/rating_YYYYMMDD.csv
+数据：仅拉这一只股票的历史日线 + 可选拉一次全市场资金流快照筛取此股。
 """
 import sys
 import io
@@ -21,18 +16,15 @@ if sys.stdout.encoding and sys.stdout.encoding.lower() != "utf-8":
     sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8")
     sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8")
 
+import numpy as np
 import pandas as pd
 
 from data.fetcher import DataFetcher
-from universe import get_universe
-from factors import compute_all_factors
-from grader import grade_all, DIMENSIONS
-# 复用 screen.py 的拉数据函数（避免重复实现）
-from screen import fetch_history_panel, LOOKBACK_DAYS
+from single_grader import grade_single
 
 
-def _normalize_code(code: str) -> str:
-    """600487 -> 600487.SH; 000001 -> 000001.SZ; 已带后缀的原样"""
+def normalize_code(code: str) -> str:
+    """6 位数字 -> ts_code 形式"""
     code = code.strip().upper()
     if "." in code:
         return code
@@ -42,101 +34,116 @@ def _normalize_code(code: str) -> str:
     return f"{s}.SZ"
 
 
+def compute_tech_factors(daily: pd.DataFrame) -> dict:
+    """从历史日线算量价 4 因子"""
+    if daily.empty or len(daily) < 30:
+        return {}
+    df = daily.sort_values("trade_date").reset_index(drop=True)
+    close = df["close"].astype(float)
+    out = {}
+
+    # 30 日累计收益
+    if len(close) > 30:
+        out["mom_30"] = float(close.iloc[-1] / close.iloc[-31] - 1)
+    # 5 日累计收益
+    if len(close) > 5:
+        out["reversal_5"] = float(close.iloc[-1] / close.iloc[-6] - 1)
+    # 20 日日收益的年化波动率 = std × sqrt(252)
+    if len(close) >= 21:
+        ret = close.pct_change().iloc[-20:]
+        out["low_vol"] = float(ret.std() * np.sqrt(252))
+    # 20 日均换手率
+    if "turnover_rate" in df.columns and len(df) >= 20:
+        out["liquidity"] = float(df["turnover_rate"].iloc[-20:].mean())
+    return out
+
+
 def main():
-    parser = argparse.ArgumentParser(description="A股多维度评级")
-    parser.add_argument("codes", nargs="*", help="股票代码（如 600487 或 600487.SH）")
-    parser.add_argument("--top", type=int, default=0, help="全市场跑完取 Top N")
-    parser.add_argument("--all", action="store_true", help="输出全市场评级")
-    parser.add_argument("--lookback", type=int, default=LOOKBACK_DAYS, help="历史回看天数")
+    parser = argparse.ArgumentParser(description="A股单股量化评级")
+    parser.add_argument("code", help="股票代码，如 002028 或 002028.SZ")
+    parser.add_argument("--no-flow", action="store_true",
+                        help="跳过资金面（不拉全市场资金流快照，速度更快）")
+    parser.add_argument("--lookback", type=int, default=90,
+                        help="历史回看天数（默认 90 自然日，约 60 交易日）")
     args = parser.parse_args()
 
-    print("=" * 60)
-    print("沪深主板个股多维度评级")
-    print("=" * 60)
+    ts_code = normalize_code(args.code)
+    print(f"开始评级: {ts_code}")
 
     fetcher = DataFetcher()
     asof_dt = datetime.now()
     asof = asof_dt.strftime("%Y%m%d")
-    start = (asof_dt - timedelta(days=args.lookback + 40)).strftime("%Y%m%d")
-    print(f"\n截面日: {asof}    回看起点: {start}")
+    start = (asof_dt - timedelta(days=args.lookback + 30)).strftime("%Y%m%d")
 
-    # 1. 全市场 universe（评级永远基于全市场分布）
-    print("\n[1/4] 筛选沪深主板股票池...")
-    universe = get_universe(fetcher, exclude_st=True, min_list_days=0)
-    print(f"  股票池: {len(universe)} 只")
+    # ---- 1) 历史日线（量价因子来源）----
+    print(f"  [1] 拉取历史日线 {start} ~ {asof} ...")
+    daily = fetcher.get_daily(ts_code, start, asof)
+    if daily.empty:
+        print(f"  错误: {ts_code} 历史数据为空（可能代码错误或已停牌）")
+        sys.exit(1)
+    print(f"      {len(daily)} 行日线")
 
-    # 2. spot + 资金流
-    print("\n[2/4] 获取截面快照 + 主力资金流...")
-    spot = fetcher.get_market_snapshot()
-    print(f"  spot: {len(spot)} 只")
-    fund_flow = fetcher.get_fund_flow_snapshot(window="5日排行")
-    if fund_flow.empty:
-        print("  fund_flow: 不可用（资金维度评级会缺失）")
+    factor_values = compute_tech_factors(daily)
+
+    # ---- 2a) 估值（PE/PB）：单股接口 ak.stock_a_indicator_lg ----
+    print(f"  [2a] 拉取估值指标（PE/PB）...")
+    ind = fetcher.get_stock_indicator(ts_code)
+    if not ind.empty:
+        last = ind.iloc[-1]
+        for src_key, dst_key in [("pe_ttm", "pe_ttm"), ("pe", "pe_ttm"), ("pb", "pb")]:
+            if src_key in last and pd.notna(last[src_key]) and dst_key not in factor_values:
+                factor_values[dst_key] = float(last[src_key])
+        print(f"      估值: pe_ttm={factor_values.get('pe_ttm', 'N/A')}, "
+              f"pb={factor_values.get('pb', 'N/A')}")
+
+    # ---- 2b) 股票名（从 spot 快照取，失败不影响）----
+    name = ""
+    print(f"  [2b] 拉取股票名称...")
+    try:
+        spot = fetcher.get_market_snapshot()
+        row = spot[spot["ts_code"] == ts_code]
+        if not row.empty:
+            name = row.iloc[0].get("name", "") or ""
+    except Exception as e:
+        print(f"      [warn] spot 拉取失败（不影响评级）: {type(e).__name__}: {str(e)[:80]}")
+
+    # ---- 3) 资金流 ----
+    if not args.no_flow:
+        print(f"  [3] 拉取资金流快照（同花顺源）...")
+        try:
+            ff = fetcher.get_fund_flow_snapshot(window="5日排行")
+            if not ff.empty:
+                row = ff[ff["ts_code"] == ts_code]
+                if not row.empty:
+                    r = row.iloc[0]
+                    if "fund_net" in r and pd.notna(r["fund_net"]):
+                        factor_values["fund_net_5d"] = float(r["fund_net"])
+                    if {"fund_inflow", "fund_outflow"}.issubset(r.index):
+                        inflow = float(r["fund_inflow"]) if pd.notna(r["fund_inflow"]) else 0
+                        outflow = float(r["fund_outflow"]) if pd.notna(r["fund_outflow"]) else 0
+                        total = abs(inflow) + abs(outflow)
+                        if total > 0:
+                            factor_values["inflow_ratio_5d"] = (inflow - outflow) / total
+                else:
+                    print(f"      [warn] {ts_code} 不在资金流快照中")
+        except Exception as e:
+            print(f"      [warn] 资金流拉取失败: {type(e).__name__}: {str(e)[:80]}")
     else:
-        print(f"  fund_flow: {len(fund_flow)} 只")
+        print(f"  [3] 跳过资金面 (--no-flow)")
 
-    # 3. 历史日线
-    print(f"\n[3/4] 拉取 {len(universe)} 只股票近 {args.lookback}+ 天日线...")
-    panel = fetch_history_panel(fetcher, universe["ts_code"].tolist(), start, asof)
-    print(f"  面板: {len(panel)} 行 × {panel['ts_code'].nunique()} 只")
+    # ---- 4) 评级 ----
+    rating = grade_single(ts_code=ts_code, name=name, asof=asof,
+                          factor_values=factor_values)
 
-    spot_cols = [c for c in ["ts_code", "pe_ttm", "pb", "total_mv", "circ_mv"] if c in spot.columns]
-    panel = panel.merge(spot[spot_cols], on="ts_code", how="left")
-    if not fund_flow.empty:
-        flow_cols = [c for c in ["ts_code", "fund_inflow", "fund_outflow", "fund_net"]
-                     if c in fund_flow.columns]
-        panel = panel.merge(fund_flow[flow_cols], on="ts_code", how="left")
+    print()
+    print(rating.to_report())
 
-    # 4. 因子 + 评级
-    print("\n[4/4] 计算因子 + 多维度评级...")
-    factors = compute_all_factors(panel, asof_date=asof)
-    print(f"  因子表: {factors.shape}")
-    ratings = grade_all(factors)
-    print(f"  评级: 3 维度 + 综合，共 {len(ratings)} 只参与分档")
-
-    # 5. 合并股票名
-    name_map = universe.set_index("ts_code")[["name"]]
-    out = ratings.join(name_map, how="left")
-
-    # 6. 筛输出范围
-    if args.codes:
-        wanted = [_normalize_code(c) for c in args.codes]
-        missing = [c for c in wanted if c not in out.index]
-        if missing:
-            print(f"\n  [warn] 以下代码不在主板股票池中: {missing}")
-        out = out.loc[[c for c in wanted if c in out.index]]
-    elif args.top > 0:
-        out = out.sort_values("score_total", ascending=False).head(args.top)
-    elif args.all:
-        out = out.sort_values("score_total", ascending=False)
-    else:
-        # 默认行为：输出 Top 50
-        out = out.sort_values("score_total", ascending=False).head(50)
-
-    # 7. 输出
-    display_cols = [
-        "name", "grade_total", "score_total",
-        "grade_value", "score_value",
-        "grade_tech",  "score_tech",
-        "grade_flow",  "score_flow",
-    ]
-    out = out[[c for c in display_cols if c in out.columns]]
-
+    # 保存评级结果
     os.makedirs("output", exist_ok=True)
-    out_path = os.path.join("output", f"rating_{asof}.csv")
-    out.to_csv(out_path, encoding="utf-8-sig", float_format="%.4f")
-    print(f"\n评级结果已保存: {out_path}")
-
-    print("\n" + "=" * 60)
-    print(f"评级展示 ({len(out)} 只)")
-    print("=" * 60)
-    pd.set_option("display.unicode.east_asian_width", True)
-    pd.set_option("display.width", 220)
-    show = out.copy()
-    for c in ["score_total", "score_value", "score_tech", "score_flow"]:
-        if c in show.columns:
-            show[c] = show[c].round(3)
-    print(show.to_string())
+    out_path = os.path.join("output", f"rating_{ts_code.replace('.', '_')}_{asof}.txt")
+    with open(out_path, "w", encoding="utf-8") as f:
+        f.write(rating.to_report())
+    print(f"\n评级报告已保存: {out_path}")
 
 
 if __name__ == "__main__":

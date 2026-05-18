@@ -9,6 +9,7 @@ os.environ["NO_PROXY"] = "*"
 os.environ["no_proxy"] = "*"
 
 import time
+import numpy as np
 import pandas as pd
 import akshare as ak
 
@@ -161,6 +162,51 @@ class DataFetcher:
         return df
 
     # ------------------------------------------------------------------
+    # 单股估值指标（PE/PB/股息率历史）
+    # ------------------------------------------------------------------
+    def get_stock_indicator(self, ts_code) -> pd.DataFrame:
+        """单股估值指标（PE/PB/市值，东财源）
+
+        Returns:
+            DataFrame: 含 PE/PB/总市值 列；失败时返回空 DataFrame
+        """
+        cache_name = f"indicator_{ts_code}"
+        cached = self._load_cache(cache_name)
+        if cached is not None:
+            return cached
+
+        symbol = ts_code_to_symbol(ts_code)
+        try:
+            df = ak.stock_value_em(symbol=symbol)
+        except Exception as e:
+            print(f"  [warn] {ts_code} 估值指标拉取失败: {type(e).__name__}: {str(e)[:80]}")
+            return pd.DataFrame()
+        if df is None or df.empty:
+            return pd.DataFrame()
+
+        # 字段标准化（接口可能用中文/英文，做兼容）
+        rename = {
+            "数据日期": "trade_date",
+            "日期":     "trade_date",
+            "PE(TTM)":  "pe_ttm",
+            "PE(静)":   "pe",
+            "市盈率TTM": "pe_ttm",
+            "市盈率":   "pe",
+            "市净率":   "pb",
+            "PB":       "pb",
+            "总市值":   "total_mv",
+        }
+        df = df.rename(columns={k: v for k, v in rename.items() if k in df.columns})
+        if "trade_date" in df.columns:
+            df["trade_date"] = pd.to_datetime(df["trade_date"], errors="coerce")
+            df = df.sort_values("trade_date").reset_index(drop=True)
+        for c in ["pe", "pe_ttm", "pb", "total_mv"]:
+            if c in df.columns:
+                df[c] = pd.to_numeric(df[c], errors="coerce")
+        self._save_cache(cache_name, df)
+        return df
+
+    # ------------------------------------------------------------------
     # 资金流快照（同花顺源，全市场一次拉完）
     # ------------------------------------------------------------------
     def get_fund_flow_snapshot(self, window: str = "5日排行",
@@ -187,19 +233,51 @@ class DataFetcher:
             return pd.DataFrame()
 
         # 字段重命名（同花顺中文字段 -> 英文，兼容不同窗口字段差异）
+        # 即时:      流入资金 / 流出资金 / 净额
+        # N日排行:   资金流入净额（只有净额，没有分别流入流出）
         rename_map = {
             "股票代码": "symbol",
             "股票简称": "name",
             "最新价": "close",
             "涨跌幅": "pct_chg",
+            "阶段涨跌幅": "pct_chg",
             "换手率": "turnover_rate",
+            "连续换手率": "turnover_rate",
             "流入资金": "fund_inflow",
             "流出资金": "fund_outflow",
             "净额": "fund_net",
             "净流入": "fund_net",
             "净流入额": "fund_net",
+            "资金流入净额": "fund_net",
         }
         df = df.rename(columns={k: v for k, v in rename_map.items() if k in df.columns})
+
+        # 同花顺返回的数值是带"亿/万/%"后缀的字符串，先解析成 float
+        def _parse_num(s):
+            if pd.isna(s) or s is None:
+                return np.nan
+            t = str(s).strip()
+            if t in ("", "-", "--"):
+                return np.nan
+            mult = 1.0
+            if t.endswith("%"):
+                try:
+                    return float(t[:-1]) / 100.0
+                except ValueError:
+                    return np.nan
+            if t.endswith("亿"):
+                mult, t = 1e8, t[:-1]
+            elif t.endswith("万"):
+                mult, t = 1e4, t[:-1]
+            try:
+                return float(t) * mult
+            except ValueError:
+                return np.nan
+
+        for c in ["close", "pct_chg", "turnover_rate",
+                  "fund_inflow", "fund_outflow", "fund_net"]:
+            if c in df.columns:
+                df[c] = df[c].map(_parse_num)
 
         if "symbol" not in df.columns:
             print(f"  [warn] 同花顺资金流返回无 symbol 列，原始字段: {list(df.columns)}")
@@ -207,11 +285,6 @@ class DataFetcher:
 
         df["symbol"] = df["symbol"].astype(str).str.zfill(6)
         df["ts_code"] = df["symbol"].map(symbol_to_ts_code)
-
-        for c in ["close", "pct_chg", "turnover_rate",
-                  "fund_inflow", "fund_outflow", "fund_net"]:
-            if c in df.columns:
-                df[c] = pd.to_numeric(df[c], errors="coerce")
 
         # 若接口未直接给净额，由流入-流出计算
         if "fund_net" not in df.columns:
