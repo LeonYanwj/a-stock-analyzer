@@ -86,6 +86,7 @@ class DataFetcher:
     def __init__(self, token=None):
         os.makedirs(CACHE_DIR, exist_ok=True)
         self._snapshot_cache = None  # 进程内 spot 快照缓存
+        self._fund_flow_cache = {}   # 资金流快照缓存（按窗口）
 
     def _cache_path(self, name):
         return os.path.join(CACHE_DIR, f"{name}.csv")
@@ -157,6 +158,72 @@ class DataFetcher:
 
         print(f"  [snapshot] source={used}, cols={list(df.columns)}, rows={len(df)}")
         self._snapshot_cache = df
+        return df
+
+    # ------------------------------------------------------------------
+    # 资金流快照（同花顺源，全市场一次拉完）
+    # ------------------------------------------------------------------
+    def get_fund_flow_snapshot(self, window: str = "5日排行",
+                               use_cache: bool = True) -> pd.DataFrame:
+        """全市场资金流快照（同花顺源）
+
+        Args:
+            window: '即时' | '3日排行' | '5日排行' | '10日排行' | '20日排行'
+
+        Returns:
+            DataFrame: ts_code, symbol, fund_inflow, fund_outflow, fund_net
+                       本接口失败时返回空 DataFrame（不抛异常，不阻塞主流程）
+        """
+        if use_cache and window in self._fund_flow_cache:
+            return self._fund_flow_cache[window]
+
+        try:
+            df = ak.stock_fund_flow_individual(symbol=window)
+        except Exception as e:
+            print(f"  [warn] 同花顺资金流接口失败 ({window}): {type(e).__name__}: {str(e)[:80]}")
+            return pd.DataFrame()
+
+        if df is None or df.empty:
+            return pd.DataFrame()
+
+        # 字段重命名（同花顺中文字段 -> 英文，兼容不同窗口字段差异）
+        rename_map = {
+            "股票代码": "symbol",
+            "股票简称": "name",
+            "最新价": "close",
+            "涨跌幅": "pct_chg",
+            "换手率": "turnover_rate",
+            "流入资金": "fund_inflow",
+            "流出资金": "fund_outflow",
+            "净额": "fund_net",
+            "净流入": "fund_net",
+            "净流入额": "fund_net",
+        }
+        df = df.rename(columns={k: v for k, v in rename_map.items() if k in df.columns})
+
+        if "symbol" not in df.columns:
+            print(f"  [warn] 同花顺资金流返回无 symbol 列，原始字段: {list(df.columns)}")
+            return pd.DataFrame()
+
+        df["symbol"] = df["symbol"].astype(str).str.zfill(6)
+        df["ts_code"] = df["symbol"].map(symbol_to_ts_code)
+
+        for c in ["close", "pct_chg", "turnover_rate",
+                  "fund_inflow", "fund_outflow", "fund_net"]:
+            if c in df.columns:
+                df[c] = pd.to_numeric(df[c], errors="coerce")
+
+        # 若接口未直接给净额，由流入-流出计算
+        if "fund_net" not in df.columns:
+            if "fund_inflow" in df.columns and "fund_outflow" in df.columns:
+                df["fund_net"] = df["fund_inflow"] - df["fund_outflow"]
+
+        keep = [c for c in ["ts_code", "symbol", "fund_inflow", "fund_outflow", "fund_net"]
+                if c in df.columns]
+        df = df[keep].copy()
+
+        print(f"  [fund_flow] window={window}, rows={len(df)}, cols={list(df.columns)}")
+        self._fund_flow_cache[window] = df
         return df
 
     # ------------------------------------------------------------------

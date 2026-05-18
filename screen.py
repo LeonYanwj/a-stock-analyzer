@@ -78,10 +78,12 @@ def main():
         universe = universe.head(args.limit)
     print(f"  股票池: {len(universe)} 只")
 
-    # 2. 全市场截面快照（PE/PB/市值/换手率）
-    print("\n[2/4] 获取全市场截面快照...")
+    # 2. 全市场截面快照（PE/PB/市值/换手率）+ 资金流（同花顺源）
+    print("\n[2/4] 获取全市场截面快照 + 主力资金流...")
     spot = fetcher.get_market_snapshot()
-    print(f"  快照: {len(spot)} 只")
+    print(f"  spot: {len(spot)} 只")
+    fund_flow = fetcher.get_fund_flow_snapshot(window="5日排行")
+    print(f"  fund_flow: {len(fund_flow)} 只" if not fund_flow.empty else "  fund_flow: 不可用（资金流因子会跳过）")
 
     # 3. 历史日线（用于动量/反转/波动率因子）
     print(f"\n[3/4] 拉取 {len(universe)} 只股票近 {args.lookback}+ 天日线...")
@@ -91,6 +93,12 @@ def main():
     # 把 spot 截面字段 merge 到 panel（compute 时 snap 取最新日截面）
     spot_cols = [c for c in ["ts_code", "pe_ttm", "pb", "total_mv", "circ_mv"] if c in spot.columns]
     panel = panel.merge(spot[spot_cols], on="ts_code", how="left")
+
+    # 把资金流字段也 merge 进 panel
+    if not fund_flow.empty:
+        flow_cols = [c for c in ["ts_code", "fund_inflow", "fund_outflow", "fund_net"]
+                     if c in fund_flow.columns]
+        panel = panel.merge(fund_flow[flow_cols], on="ts_code", how="left")
 
     # 4. 因子 + 打分
     print("\n[4/4] 计算因子 + 打分排序...")
@@ -103,7 +111,8 @@ def main():
     name_map = universe.set_index("ts_code")[["name"]]
     out = picks.join(name_map, how="left")
     cols = ["name", "score", "valid_factors",
-            "ep_ttm", "bp", "mom_30", "reversal_5", "small_size", "low_vol", "liquidity"]
+            "ep_ttm", "bp", "mom_30", "reversal_5", "small_size", "low_vol", "liquidity",
+            "main_inflow", "inflow_ratio"]
     out = out[[c for c in cols if c in out.columns]]
 
     os.makedirs("output", exist_ok=True)

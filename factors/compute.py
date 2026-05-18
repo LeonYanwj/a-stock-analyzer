@@ -12,13 +12,15 @@ import pandas as pd
 
 # 因子权重（正向：越大越好；权重为正表示该因子值越大越倾向于选入）
 FACTOR_WEIGHTS = {
-    "ep_ttm":      1.0,   # 1/PE_TTM，价值
-    "bp":          1.0,   # 1/PB，价值
-    "mom_30":      0.8,   # 过去 30 日动量（约 1.5 个月）
-    "reversal_5":  0.5,   # 短期反转（5日收益取负）
-    "small_size":  0.6,   # 小市值溢价（流通市值取负）
-    "low_vol":     0.6,   # 低波动（20日波动率取负）
-    "liquidity":   0.3,   # 20日均换手率（避免选到流动性差的）
+    "ep_ttm":       1.0,   # 1/PE_TTM，价值
+    "bp":           1.0,   # 1/PB，价值
+    "mom_30":       0.8,   # 过去 30 日动量（约 1.5 个月）
+    "reversal_5":   0.5,   # 短期反转（5日收益取负）
+    "small_size":   0.6,   # 小市值溢价（流通市值取负）
+    "low_vol":      0.6,   # 低波动（20日波动率取负）
+    "liquidity":    0.3,   # 20日均换手率（避免选到流动性差的）
+    "main_inflow":  1.0,   # 主力资金近 N 日净流入额（捡筹码信号）
+    "inflow_ratio": 0.8,   # 净流入占资金总进出比 (in-out)/(in+out)
 }
 
 
@@ -91,14 +93,30 @@ def compute_all_factors(panel: pd.DataFrame, asof_date: pd.Timestamp) -> pd.Data
     else:
         liquidity = turn_wide.mean()
 
+    # 资金流因子（来自 fund_flow 快照 merge 进 panel，截面值）
+    if "fund_net" in snap.columns:
+        main_inflow = pd.to_numeric(snap["fund_net"], errors="coerce")
+    else:
+        main_inflow = pd.Series(dtype=float)
+
+    if "fund_inflow" in snap.columns and "fund_outflow" in snap.columns:
+        inflow = pd.to_numeric(snap["fund_inflow"], errors="coerce")
+        outflow = pd.to_numeric(snap["fund_outflow"], errors="coerce")
+        total = inflow.abs() + outflow.abs()
+        inflow_ratio = (inflow - outflow) / total.where(total > 0)
+    else:
+        inflow_ratio = pd.Series(dtype=float)
+
     factors = pd.DataFrame({
-        "ep_ttm":     ep_ttm,
-        "bp":         bp,
-        "mom_30":     mom_30,
-        "reversal_5": reversal_5,
-        "small_size": small_size,
-        "low_vol":    low_vol,
-        "liquidity":  liquidity,
+        "ep_ttm":       ep_ttm,
+        "bp":           bp,
+        "mom_30":       mom_30,
+        "reversal_5":   reversal_5,
+        "small_size":   small_size,
+        "low_vol":      low_vol,
+        "liquidity":    liquidity,
+        "main_inflow":  main_inflow,
+        "inflow_ratio": inflow_ratio,
     })
     factors.index.name = "ts_code"
     return factors

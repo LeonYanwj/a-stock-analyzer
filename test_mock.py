@@ -86,6 +86,10 @@ def make_mock_panel(ts_codes, n_days=N_DAYS):
     pb = np.random.lognormal(0.5, 0.5, n)
     total_mv = np.random.lognormal(13, 1.0, n)
     circ_mv = total_mv * np.random.uniform(0.6, 0.95, n)
+    # 资金流（亿元级量级；服从对称分布，有进有出）
+    fund_inflow = np.random.lognormal(8, 1.0, n)
+    fund_outflow = np.random.lognormal(8, 1.0, n)
+    fund_net = fund_inflow - fund_outflow
 
     # 注入若干异常值检验防御
     pe_ttm[np.random.choice(n, max(1, n // 20), replace=False)] = np.nan
@@ -97,6 +101,9 @@ def make_mock_panel(ts_codes, n_days=N_DAYS):
         "pb": pb,
         "total_mv": total_mv,
         "circ_mv": circ_mv,
+        "fund_inflow": fund_inflow,
+        "fund_outflow": fund_outflow,
+        "fund_net": fund_net,
     })
     return panel.merge(snap, on="ts_code", how="left")
 
