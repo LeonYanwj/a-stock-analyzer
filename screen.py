@@ -112,7 +112,7 @@ def main():
     out = picks.join(name_map, how="left")
     cols = ["name", "score", "valid_factors",
             "ep_ttm", "bp", "mom_30", "reversal_5", "small_size", "low_vol", "liquidity",
-            "main_inflow", "inflow_ratio"]
+            "main_inflow", "inflow_ratio", "macd_hist", "macd_slope"]
     out = out[[c for c in cols if c in out.columns]]
 
     os.makedirs("output", exist_ok=True)
