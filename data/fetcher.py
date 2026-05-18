@@ -28,12 +28,24 @@ def ts_code_to_symbol(ts_code: str) -> str:
     return str(ts_code).split(".")[0].zfill(6)
 
 
-# AKShare spot 字段 -> 统一英文
+def ts_code_to_sina_symbol(ts_code: str) -> str:
+    """ts_code -> 新浪/腾讯格式 ('sh600000' / 'sz000001')"""
+    base = ts_code_to_symbol(ts_code)
+    suffix = str(ts_code).split(".")[-1].lower()
+    if suffix == "sh":
+        return f"sh{base}"
+    if suffix == "sz":
+        return f"sz{base}"
+    return base
+
+
+# AKShare spot 字段 -> 统一英文（兼容东财和新浪源）
 _SPOT_RENAME = {
     "代码": "symbol",
     "名称": "name",
     "最新价": "close",
     "涨跌幅": "pct_chg",
+    "涨跌额": "change",
     "成交量": "vol",
     "成交额": "amount",
     "换手率": "turnover_rate",
@@ -42,6 +54,10 @@ _SPOT_RENAME = {
     "总市值": "total_mv",
     "流通市值": "circ_mv",
     "量比": "volume_ratio",
+    "昨收": "pre_close",
+    "今开": "open",
+    "最高": "high",
+    "最低": "low",
 }
 
 # AKShare hist 字段 -> 统一英文
@@ -88,28 +104,58 @@ class DataFetcher:
     # ------------------------------------------------------------------
     # 全市场截面快照
     # ------------------------------------------------------------------
-    def get_market_snapshot(self, use_cache: bool = True) -> pd.DataFrame:
-        """全市场实时快照（含 PE/PB/市值/换手率）"""
+    def get_market_snapshot(self, use_cache: bool = True, source: str = "auto") -> pd.DataFrame:
+        """全市场实时快照
+
+        Args:
+            use_cache: 是否使用进程内缓存
+            source: 'em' 东财（字段全含 PE/PB/市值，但部分网络下被封）
+                    'sina' 新浪（只有量价字段，国内访问稳定）
+                    'auto' 自动：先东财，失败回退新浪
+        """
         if use_cache and self._snapshot_cache is not None:
             return self._snapshot_cache
 
-        df = ak.stock_zh_a_spot_em()
+        df = None
+        used = None
+        if source in ("em", "auto"):
+            try:
+                df = ak.stock_zh_a_spot_em()
+                used = "em"
+            except Exception as e:
+                if source == "em":
+                    raise
+                print(f"  [warn] 东财 spot 失败，回退新浪: {type(e).__name__}")
+
+        if df is None or df.empty:
+            df = ak.stock_zh_a_spot()
+            used = "sina"
+
         df = df.rename(columns=_SPOT_RENAME)
-        # 只保留我们要用的列
+
+        # 新浪源 symbol 带 'sh'/'sz'/'bj' 前缀，东财源不带
+        raw = df["symbol"].astype(str)
+        has_prefix = raw.str[:2].isin(["sh", "sz", "bj"]).any()
+        if has_prefix:
+            # 剔除北交所
+            df = df[~raw.str.startswith("bj")].reset_index(drop=True)
+            df["symbol"] = df["symbol"].astype(str).str[2:].str.zfill(6)
+        else:
+            df["symbol"] = df["symbol"].astype(str).str.zfill(6)
+
         keep = [c for c in
                 ["symbol", "name", "close", "pct_chg", "vol", "amount",
                  "turnover_rate", "pe_ttm", "pb", "total_mv", "circ_mv", "volume_ratio"]
                 if c in df.columns]
         df = df[keep].copy()
-        df["symbol"] = df["symbol"].astype(str).str.zfill(6)
         df["ts_code"] = df["symbol"].map(symbol_to_ts_code)
 
-        # 数值列强制转 float（AKShare 偶尔混入 "-"）
         for c in ["close", "pct_chg", "vol", "amount", "turnover_rate",
                   "pe_ttm", "pb", "total_mv", "circ_mv", "volume_ratio"]:
             if c in df.columns:
                 df[c] = pd.to_numeric(df[c], errors="coerce")
 
+        print(f"  [snapshot] source={used}, cols={list(df.columns)}, rows={len(df)}")
         self._snapshot_cache = df
         return df
 
@@ -134,40 +180,72 @@ class DataFetcher:
     # ------------------------------------------------------------------
     # 单股历史日线（带文件缓存）
     # ------------------------------------------------------------------
-    def get_daily(self, ts_code, start_date, end_date, adjust="qfq"):
-        """获取单股历史日线，字段对齐 Tushare daily
+    def get_daily(self, ts_code, start_date, end_date, adjust="qfq", source="sina"):
+        """获取单股历史日线，统一英文字段
 
         Args:
             ts_code: 如 '000001.SZ'
             start_date / end_date: 'YYYYMMDD'
             adjust: '' 不复权 / 'qfq' 前复权 / 'hfq' 后复权
+            source: 'sina' 新浪（稳，含换手率）/ 'em' 东财（批量易反爬）/ 'tx' 腾讯（轻量）
         """
         cache_name = f"daily_{ts_code}_{start_date}_{end_date}_{adjust or 'raw'}"
         cached = self._load_cache(cache_name)
         if cached is not None:
             return cached
 
-        symbol = ts_code_to_symbol(ts_code)
         try:
-            df = ak.stock_zh_a_hist(
-                symbol=symbol,
-                period="daily",
-                start_date=start_date,
-                end_date=end_date,
-                adjust=adjust,
-            )
+            if source == "sina":
+                sym = ts_code_to_sina_symbol(ts_code)
+                df = ak.stock_zh_a_daily(
+                    symbol=sym,
+                    adjust=adjust if adjust in ("qfq", "hfq") else "",
+                    start_date=start_date,
+                    end_date=end_date,
+                )
+                df = df.rename(columns={
+                    "date": "trade_date",
+                    "volume": "vol",
+                    "turnover": "turnover_rate",
+                })
+                # 新浪 turnover 是小数（0.0047 表 0.47%），统一成百分比
+                if "turnover_rate" in df.columns:
+                    df["turnover_rate"] = df["turnover_rate"] * 100
+            elif source == "em":
+                df = ak.stock_zh_a_hist(
+                    symbol=ts_code_to_symbol(ts_code),
+                    period="daily",
+                    start_date=start_date,
+                    end_date=end_date,
+                    adjust=adjust,
+                )
+                df = df.rename(columns=_HIST_RENAME)
+            elif source == "tx":
+                df = ak.stock_zh_a_hist_tx(
+                    symbol=ts_code_to_sina_symbol(ts_code),
+                    start_date=start_date,
+                    end_date=end_date,
+                    adjust=adjust if adjust in ("qfq", "hfq") else "",
+                )
+                df = df.rename(columns={"date": "trade_date"})
+            else:
+                raise ValueError(f"未知 source: {source}")
         except Exception as e:
-            print(f"  [warn] {ts_code} 拉取失败: {e}")
+            print(f"  [warn] {ts_code} 拉取失败 ({source}): {type(e).__name__}: {str(e)[:80]}")
             return pd.DataFrame()
 
         if df is None or df.empty:
             return pd.DataFrame()
 
-        df = df.rename(columns=_HIST_RENAME)
-        df["symbol"] = df["symbol"].astype(str).str.zfill(6)
         df["ts_code"] = ts_code
+        df["symbol"] = ts_code_to_symbol(ts_code)
         df["trade_date"] = pd.to_datetime(df["trade_date"])
         df = df.sort_values("trade_date").reset_index(drop=True)
+
+        # pct_chg 缺失时由 close 计算
+        if "pct_chg" not in df.columns and "close" in df.columns:
+            df["pct_chg"] = df["close"].pct_change() * 100
+
         for c in ["open", "close", "high", "low", "vol", "amount",
                   "amplitude", "pct_chg", "change", "turnover_rate"]:
             if c in df.columns:
