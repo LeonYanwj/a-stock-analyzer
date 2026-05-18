@@ -14,7 +14,7 @@ import pandas as pd
 FACTOR_WEIGHTS = {
     "ep_ttm":      1.0,   # 1/PE_TTM，价值
     "bp":          1.0,   # 1/PB，价值
-    "mom_60":      0.8,   # 过去 60 日动量
+    "mom_30":      0.8,   # 过去 30 日动量（约 1.5 个月）
     "reversal_5":  0.5,   # 短期反转（5日收益取负）
     "small_size":  0.6,   # 小市值溢价（流通市值取负）
     "low_vol":     0.6,   # 低波动（20日波动率取负）
@@ -71,7 +71,7 @@ def compute_all_factors(panel: pd.DataFrame, asof_date: pd.Timestamp) -> pd.Data
             return pd.Series(dtype=float)
         return (log_close.iloc[-1] - log_close.iloc[-1 - n]).rename(None)
 
-    mom_60 = _ret_n(60)
+    mom_30 = _ret_n(30)
     reversal_5 = -_ret_n(5)
 
     # 波动率（20日日收益标准差，取负）
@@ -94,7 +94,7 @@ def compute_all_factors(panel: pd.DataFrame, asof_date: pd.Timestamp) -> pd.Data
     factors = pd.DataFrame({
         "ep_ttm":     ep_ttm,
         "bp":         bp,
-        "mom_60":     mom_60,
+        "mom_30":     mom_30,
         "reversal_5": reversal_5,
         "small_size": small_size,
         "low_vol":    low_vol,
