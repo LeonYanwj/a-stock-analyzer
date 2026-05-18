@@ -28,10 +28,14 @@ DIM_FACTORS = {
         "label": "资金面",
         "factors": ["fund_net_5d", "inflow_ratio_5d"],
     },
+    "news": {
+        "label": "消息面",
+        "factors": ["news_score"],
+    },
 }
 
 # 综合评级时各维度权重
-DIM_WEIGHTS = {"tech": 1.0, "value": 1.0, "flow": 1.2}
+DIM_WEIGHTS = {"tech": 1.0, "value": 1.0, "flow": 1.2, "news": 0.8}
 
 
 def _stars(n: int) -> str:
@@ -133,6 +137,17 @@ def score_inflow_ratio_5d(v):
     return 1, f"净流入占比 {pct:.1f}%（资金压倒性流出）"
 
 
+def score_news_score(v):
+    """综合消息面分数（新闻+公告+研报加权后），约 -3 ~ +3"""
+    if v is None or pd.isna(v):
+        return None, "无消息面数据"
+    if v >= 1.5:     return 5, f"消息面强正面 (综合分 {v:+.2f})"
+    if v >= 0.5:     return 4, f"消息面正面 (综合分 {v:+.2f})"
+    if v >= -0.5:    return 3, f"消息面中性 (综合分 {v:+.2f})"
+    if v >= -1.5:    return 2, f"消息面偏负 (综合分 {v:+.2f})"
+    return 1, f"消息面强负面 (综合分 {v:+.2f})"
+
+
 SCORERS = {
     "mom_30":          score_mom_30,
     "reversal_5":      score_reversal_5,
@@ -142,6 +157,7 @@ SCORERS = {
     "pb":              score_pb,
     "fund_net_5d":     score_fund_net_5d,
     "inflow_ratio_5d": score_inflow_ratio_5d,
+    "news_score":      score_news_score,
 }
 
 

@@ -162,6 +162,66 @@ class DataFetcher:
         return df
 
     # ------------------------------------------------------------------
+    # 消息面：个股新闻 / 公告 / 研报
+    # ------------------------------------------------------------------
+    def get_stock_news(self, ts_code) -> pd.DataFrame:
+        """单股最近新闻（东财源，stock_news_em）
+
+        Returns: DataFrame 含 关键词/新闻标题/新闻内容/发布时间/文章来源/新闻链接
+                 失败返回空 DataFrame
+        """
+        symbol = ts_code_to_symbol(ts_code)
+        try:
+            df = ak.stock_news_em(symbol=symbol)
+        except Exception as e:
+            print(f"  [warn] {ts_code} 新闻拉取失败: {type(e).__name__}: {str(e)[:80]}")
+            return pd.DataFrame()
+        if df is None or df.empty:
+            return pd.DataFrame()
+        if "发布时间" in df.columns:
+            df["发布时间"] = pd.to_datetime(df["发布时间"], errors="coerce")
+        return df
+
+    def get_stock_disclosure(self, ts_code, days: int = 30) -> pd.DataFrame:
+        """单股近 N 天公告（巨潮 stock_zh_a_disclosure_report_cninfo）
+
+        Returns: DataFrame 含 代码/简称/公告标题/公告时间/公告链接
+        """
+        from datetime import datetime, timedelta
+        symbol = ts_code_to_symbol(ts_code)
+        end = datetime.now().strftime("%Y%m%d")
+        start = (datetime.now() - timedelta(days=days)).strftime("%Y%m%d")
+        try:
+            df = ak.stock_zh_a_disclosure_report_cninfo(
+                symbol=symbol, start_date=start, end_date=end
+            )
+        except Exception as e:
+            print(f"  [warn] {ts_code} 公告拉取失败: {type(e).__name__}: {str(e)[:80]}")
+            return pd.DataFrame()
+        if df is None or df.empty:
+            return pd.DataFrame()
+        if "公告时间" in df.columns:
+            df["公告时间"] = pd.to_datetime(df["公告时间"], errors="coerce")
+        return df
+
+    def get_stock_research(self, ts_code) -> pd.DataFrame:
+        """单股研报（东财 stock_research_report_em）
+
+        Returns: 含 东财评级、机构、报告名称、日期 等
+        """
+        symbol = ts_code_to_symbol(ts_code)
+        try:
+            df = ak.stock_research_report_em(symbol=symbol)
+        except Exception as e:
+            print(f"  [warn] {ts_code} 研报拉取失败: {type(e).__name__}: {str(e)[:80]}")
+            return pd.DataFrame()
+        if df is None or df.empty:
+            return pd.DataFrame()
+        if "日期" in df.columns:
+            df["日期"] = pd.to_datetime(df["日期"], errors="coerce")
+        return df
+
+    # ------------------------------------------------------------------
     # 单股估值指标（PE/PB/股息率历史）
     # ------------------------------------------------------------------
     def get_stock_indicator(self, ts_code) -> pd.DataFrame:

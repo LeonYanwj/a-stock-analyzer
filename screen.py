@@ -22,6 +22,7 @@ from data.fetcher import DataFetcher
 from universe import get_universe
 from factors import compute_all_factors
 from selector import score, top_n
+from news_scorer import compute_news_score
 
 
 LOOKBACK_DAYS = 60
@@ -58,6 +59,12 @@ def main():
     parser.add_argument("--limit", type=int, default=0, help="限制股票数量（0=不限制）")
     parser.add_argument("--top", type=int, default=TOP_N, help="选股 Top N")
     parser.add_argument("--lookback", type=int, default=LOOKBACK_DAYS, help="历史回看天数")
+    parser.add_argument("--news", action="store_true",
+                        help="开启消息面二次精筛（对 Top --refine 候选拉新闻+公告+研报）")
+    parser.add_argument("--refine", type=int, default=100,
+                        help="消息面精筛候选数（默认 Top 100）")
+    parser.add_argument("--news-weight", type=float, default=0.15,
+                        help="news_score 加分系数（每 1 分 ~ 加 0.15 到总分）")
     args = parser.parse_args()
 
     print("=" * 60)
@@ -105,6 +112,31 @@ def main():
     factors = compute_all_factors(panel, asof_date=asof)
     print(f"  因子表: {factors.shape[0]} 只 × {factors.shape[1]} 因子")
     scored = score(factors)
+
+    # 4.5  消息面二次精筛（可选，--news 开启）
+    if args.news:
+        valid_top = scored.dropna(subset=["score"]).head(args.refine)
+        print(f"\n[5/5] 对 Top {len(valid_top)} 候选拉取消息面（新闻+公告+研报）...")
+        news_scores = {}
+        for i, tc in enumerate(valid_top.index, 1):
+            news_df = fetcher.get_stock_news(tc)
+            disc_df = fetcher.get_stock_disclosure(tc, days=30)
+            rsr_df = fetcher.get_stock_research(tc)
+            ns = compute_news_score(news_df, disc_df, rsr_df)
+            if not pd.isna(ns["news_score"]):
+                news_scores[tc] = ns["news_score"]
+            if i % 20 == 0 or i == len(valid_top):
+                print(f"  [{i}/{len(valid_top)}]  累计有新闻数据: {len(news_scores)}")
+        # 将 news_score 加到原 score 形成 final_score
+        scored["news_score"] = pd.Series(news_scores)
+        scored["news_bonus"] = scored["news_score"].fillna(0) * args.news_weight
+        scored["final_score"] = scored["score"] + scored["news_bonus"]
+        # 仅对 Top refine 集内的股票使用 final_score 重排；其他保持原序
+        in_refine = scored.index.isin(valid_top.index)
+        scored.loc[in_refine, "score"] = scored.loc[in_refine, "final_score"]
+        scored = scored.sort_values("score", ascending=False)
+        print(f"  消息面已加权（系数 {args.news_weight}），重排序完成")
+
     picks = top_n(scored, n=args.top)
 
     # 5. 输出
@@ -112,7 +144,8 @@ def main():
     out = picks.join(name_map, how="left")
     cols = ["name", "score", "valid_factors",
             "ep_ttm", "bp", "mom_30", "reversal_5", "small_size", "low_vol", "liquidity",
-            "main_inflow", "inflow_ratio", "macd_hist", "macd_slope"]
+            "main_inflow", "inflow_ratio", "macd_hist", "macd_slope",
+            "news_score", "news_bonus"]
     out = out[[c for c in cols if c in out.columns]]
 
     os.makedirs("output", exist_ok=True)

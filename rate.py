@@ -21,6 +21,7 @@ import pandas as pd
 
 from data.fetcher import DataFetcher
 from single_grader import grade_single
+from news_scorer import compute_news_score
 
 
 def normalize_code(code: str) -> str:
@@ -63,6 +64,8 @@ def main():
     parser.add_argument("code", help="股票代码，如 002028 或 002028.SZ")
     parser.add_argument("--no-flow", action="store_true",
                         help="跳过资金面（不拉全市场资金流快照，速度更快）")
+    parser.add_argument("--no-news", action="store_true",
+                        help="跳过消息面（不拉新闻/公告/研报，速度更快）")
     parser.add_argument("--lookback", type=int, default=90,
                         help="历史回看天数（默认 90 自然日，约 60 交易日）")
     args = parser.parse_args()
@@ -131,7 +134,23 @@ def main():
     else:
         print(f"  [3] 跳过资金面 (--no-flow)")
 
-    # ---- 4) 评级 ----
+    # ---- 4) 消息面（新闻 + 公告 + 研报） ----
+    if not args.no_news:
+        print(f"  [4] 拉取消息面（新闻+公告+研报）...")
+        news_df = fetcher.get_stock_news(ts_code)
+        disc_df = fetcher.get_stock_disclosure(ts_code, days=30)
+        rsr_df = fetcher.get_stock_research(ts_code)
+        ns = compute_news_score(news_df, disc_df, rsr_df)
+        print(f"      命中: 新闻 {ns['news_hits']} / 公告 {ns['disc_hits']} / 研报 {ns['research_hits']}")
+        if not pd.isna(ns["news_score"]):
+            factor_values["news_score"] = ns["news_score"]
+            print(f"      综合分: {ns['news_score']:+.2f} "
+                  f"(新闻{ns['news_part']:+.2f}/公告{ns['disc_part']:+.2f}/研报{ns['research_part']:+.2f})"
+                  .replace("nan", "无"))
+    else:
+        print(f"  [4] 跳过消息面 (--no-news)")
+
+    # ---- 5) 评级 ----
     rating = grade_single(ts_code=ts_code, name=name, asof=asof,
                           factor_values=factor_values)
 
