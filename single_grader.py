@@ -18,11 +18,15 @@ import pandas as pd
 DIM_FACTORS = {
     "tech": {
         "label": "量价面",
-        "factors": ["mom_30", "reversal_5", "low_vol", "liquidity"],
+        "factors": ["mom_30", "reversal_5", "low_vol", "liquidity", "lxsz"],
     },
     "value": {
         "label": "价值面",
         "factors": ["pe_ttm", "pb"],
+    },
+    "quality": {
+        "label": "质量面",
+        "factors": ["roe", "gross_margin"],
     },
     "flow": {
         "label": "资金面",
@@ -35,7 +39,7 @@ DIM_FACTORS = {
 }
 
 # 综合评级时各维度权重
-DIM_WEIGHTS = {"tech": 1.0, "value": 1.0, "flow": 1.2, "news": 0.8}
+DIM_WEIGHTS = {"tech": 1.0, "value": 1.0, "quality": 1.0, "flow": 1.2, "news": 0.8}
 
 
 def _stars(n: int) -> str:
@@ -137,6 +141,39 @@ def score_inflow_ratio_5d(v):
     return 1, f"净流入占比 {pct:.1f}%（资金压倒性流出）"
 
 
+def score_roe(v):
+    """ROE 净资产收益率（百分比，例如 15 表示 15%）"""
+    if v is None or pd.isna(v):
+        return None, "ROE 数据缺失"
+    if v < 0:        return 1, f"ROE={v:.1f}%（亏损）"
+    if v >= 20:      return 5, f"ROE={v:.1f}%（优秀）"
+    if v >= 15:      return 4, f"ROE={v:.1f}%（良好）"
+    if v >= 10:      return 3, f"ROE={v:.1f}%（合格）"
+    if v >= 5:       return 2, f"ROE={v:.1f}%（偏低）"
+    return 1, f"ROE={v:.1f}%（很低）"
+
+
+def score_gross_margin(v):
+    """销售毛利率（百分比）"""
+    if v is None or pd.isna(v):
+        return None, "毛利率数据缺失"
+    if v >= 50:      return 5, f"毛利率 {v:.1f}%（高利润）"
+    if v >= 30:      return 4, f"毛利率 {v:.1f}%（良好）"
+    if v >= 20:      return 3, f"毛利率 {v:.1f}%（一般）"
+    if v >= 10:      return 2, f"毛利率 {v:.1f}%（偏低）"
+    return 1, f"毛利率 {v:.1f}%（很低）"
+
+
+def score_lxsz(v):
+    """量价齐升连涨天数（None/0=未上榜=中性 3星，上榜=加分）"""
+    if v is None or pd.isna(v) or v == 0:
+        return 3, "未在量价齐升榜（中性）"
+    if v >= 10:      return 5, f"量价齐升连涨 {int(v)} 天（强势）"
+    if v >= 6:       return 5, f"量价齐升连涨 {int(v)} 天（强势）"
+    if v >= 4:       return 4, f"量价齐升连涨 {int(v)} 天（偏强）"
+    return 4, f"量价齐升连涨 {int(v)} 天（上榜）"
+
+
 def score_news_score(v):
     """综合消息面分数（新闻+公告+研报加权后），约 -3 ~ +3"""
     if v is None or pd.isna(v):
@@ -153,8 +190,11 @@ SCORERS = {
     "reversal_5":      score_reversal_5,
     "low_vol":         score_low_vol,
     "liquidity":       score_liquidity,
+    "lxsz":            score_lxsz,
     "pe_ttm":          score_pe,
     "pb":              score_pb,
+    "roe":             score_roe,
+    "gross_margin":    score_gross_margin,
     "fund_net_5d":     score_fund_net_5d,
     "inflow_ratio_5d": score_inflow_ratio_5d,
     "news_score":      score_news_score,

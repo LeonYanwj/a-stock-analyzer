@@ -162,6 +162,89 @@ class DataFetcher:
         return df
 
     # ------------------------------------------------------------------
+    # 同花顺财务摘要 + 量价齐升排行
+    # ------------------------------------------------------------------
+    def get_stock_financial_abstract(self, ts_code) -> pd.DataFrame:
+        """单股财务摘要（同花顺，含 ROE/毛利率/净利率历史）
+
+        解析中文单位（"%/万/亿"）成 float。
+        百分比字段保留为"百分比数值"（如 23.85 表示 23.85%）。
+        """
+        cache_name = f"finabs_{ts_code}"
+        cached = self._load_cache(cache_name)
+        if cached is not None:
+            return cached
+
+        symbol = ts_code_to_symbol(ts_code)
+        try:
+            df = ak.stock_financial_abstract_ths(symbol=symbol, indicator="按报告期")
+        except Exception as e:
+            print(f"  [warn] {ts_code} 财务拉取失败: {type(e).__name__}: {str(e)[:80]}")
+            return pd.DataFrame()
+        if df is None or df.empty:
+            return pd.DataFrame()
+
+        def _parse(v):
+            if v is False or v is None or pd.isna(v):
+                return np.nan
+            t = str(v).strip()
+            if t in ("", "-", "--", "False"):
+                return np.nan
+            if t.endswith("%"):
+                try:    return float(t[:-1])
+                except: return np.nan
+            mult = 1.0
+            if t.endswith("亿"):  mult, t = 1e8, t[:-1]
+            elif t.endswith("万"): mult, t = 1e4, t[:-1]
+            try:    return float(t) * mult
+            except: return np.nan
+
+        # 数值列解析（保留"报告期"为字符串）
+        for c in df.columns:
+            if c != "报告期":
+                df[c] = df[c].map(_parse)
+        if "报告期" in df.columns:
+            df["报告期"] = pd.to_datetime(df["报告期"], errors="coerce")
+            df = df.sort_values("报告期").reset_index(drop=True)
+        self._save_cache(cache_name, df)
+        return df
+
+    def get_stock_rank_lxsz(self, use_cache: bool = True) -> pd.DataFrame:
+        """全市场量价齐升排行（同花顺，一次拉所有上榜股）
+
+        Returns: ts_code, symbol, 连涨天数, 连续涨跌幅, 累计换手率, 所属行业, 收盘价
+        """
+        if use_cache and hasattr(self, "_lxsz_cache") and self._lxsz_cache is not None:
+            return self._lxsz_cache
+        try:
+            df = ak.stock_rank_lxsz_ths()
+        except Exception as e:
+            print(f"  [warn] 量价齐升排行拉取失败: {type(e).__name__}: {str(e)[:80]}")
+            self._lxsz_cache = pd.DataFrame()
+            return self._lxsz_cache
+        if df is None or df.empty:
+            self._lxsz_cache = pd.DataFrame()
+            return self._lxsz_cache
+
+        df = df.rename(columns={
+            "股票代码": "symbol",
+            "股票简称": "name",
+            "收盘价":   "close",
+            "连涨天数": "lxsz_days",
+            "连续涨跌幅": "lxsz_pct",
+            "累计换手率": "lxsz_turn",
+            "所属行业": "industry",
+        })
+        df["symbol"] = df["symbol"].astype(str).str.zfill(6)
+        df["ts_code"] = df["symbol"].map(symbol_to_ts_code)
+        for c in ["close", "lxsz_days", "lxsz_pct", "lxsz_turn"]:
+            if c in df.columns:
+                df[c] = pd.to_numeric(df[c], errors="coerce")
+        print(f"  [lxsz] 量价齐升上榜: {len(df)} 只")
+        self._lxsz_cache = df
+        return df
+
+    # ------------------------------------------------------------------
     # 消息面：个股新闻 / 公告 / 研报
     # ------------------------------------------------------------------
     def get_stock_news(self, ts_code) -> pd.DataFrame:

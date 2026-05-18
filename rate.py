@@ -99,6 +99,47 @@ def main():
         print(f"      估值: pe_ttm={factor_values.get('pe_ttm', 'N/A')}, "
               f"pb={factor_values.get('pb', 'N/A')}")
 
+    # ---- 2c) 财务质量（ROE / 毛利率）：同花顺 ----
+    # 同花顺财报字段是单期值（Q1 / 半年 / Q3 / 年报），ROE 要按季度年化
+    print(f"  [2c] 拉取财务摘要（ROE/毛利率）...")
+    fin = fetcher.get_stock_financial_abstract(ts_code)
+    if not fin.empty:
+        last = fin.iloc[-1]
+        rpt = last.get("报告期")
+        # 季度年化系数：3月底→×4, 6月底→×2, 9月底→×4/3, 12月底→×1
+        # 兼容 datetime 和 字符串("YYYY-MM-DD") 两种缓存形态
+        month = None
+        if hasattr(rpt, "month"):
+            month = rpt.month
+        elif isinstance(rpt, str) and len(rpt) >= 7 and rpt[4] == "-":
+            try:
+                month = int(rpt[5:7])
+            except ValueError:
+                pass
+        annualize = {3: 4.0, 6: 2.0, 9: 4.0 / 3, 12: 1.0}.get(month, 1.0)
+        if "净资产收益率" in last and pd.notna(last["净资产收益率"]):
+            factor_values["roe"] = float(last["净资产收益率"]) * annualize
+        # 毛利率本身是比例，不需要年化
+        if "销售毛利率" in last and pd.notna(last["销售毛利率"]):
+            factor_values["gross_margin"] = float(last["销售毛利率"])
+        rpt_s = rpt.strftime("%Y-%m-%d") if hasattr(rpt, "strftime") else str(rpt)
+        roe_v = factor_values.get("roe", "N/A")
+        gm_v = factor_values.get("gross_margin", "N/A")
+        roe_disp = f"{roe_v:.1f}% (年化×{annualize:g})" if isinstance(roe_v, float) else roe_v
+        print(f"      最新报告期 {rpt_s}: ROE={roe_disp}, 毛利率={gm_v}%")
+
+    # ---- 2d) 量价齐升（同花顺排行，全市场一次拉，找当前股是否上榜） ----
+    print(f"  [2d] 拉取量价齐升排行...")
+    lxsz_df = fetcher.get_stock_rank_lxsz()
+    if not lxsz_df.empty:
+        row = lxsz_df[lxsz_df["ts_code"] == ts_code]
+        if not row.empty and "lxsz_days" in row.columns:
+            factor_values["lxsz"] = float(row.iloc[0]["lxsz_days"])
+            print(f"      上榜：连涨 {int(factor_values['lxsz'])} 天")
+        else:
+            factor_values["lxsz"] = 0  # 未上榜 = 0
+            print(f"      未上榜（中性）")
+
     # ---- 2b) 股票名（从 spot 快照取，失败不影响）----
     name = ""
     print(f"  [2b] 拉取股票名称...")

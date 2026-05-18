@@ -23,6 +23,7 @@ FACTOR_WEIGHTS = {
     "inflow_ratio": 0.8,   # 净流入占资金总进出比 (in-out)/(in+out)
     "macd_hist":    0.6,   # MACD 柱状值 (DIF-DEA)，正=金叉态
     "macd_slope":   0.4,   # MACD 柱状值近 5 日变化（避开"快死叉"）
+    "lxsz":         0.5,   # 量价齐升连涨天数（同花顺榜单，未上榜=0）
 }
 
 
@@ -126,6 +127,12 @@ def compute_all_factors(panel: pd.DataFrame, asof_date: pd.Timestamp) -> pd.Data
     else:
         inflow_ratio = pd.Series(dtype=float)
 
+    # 量价齐升因子（来自 lxsz_days 字段，未上榜的填 0）
+    if "lxsz_days" in snap.columns:
+        lxsz = pd.to_numeric(snap["lxsz_days"], errors="coerce").fillna(0)
+    else:
+        lxsz = pd.Series(dtype=float)
+
     factors = pd.DataFrame({
         "ep_ttm":       ep_ttm,
         "bp":           bp,
@@ -138,6 +145,7 @@ def compute_all_factors(panel: pd.DataFrame, asof_date: pd.Timestamp) -> pd.Data
         "inflow_ratio": inflow_ratio,
         "macd_hist":    macd_hist,
         "macd_slope":   macd_slope,
+        "lxsz":         lxsz,
     })
     factors.index.name = "ts_code"
     return factors
