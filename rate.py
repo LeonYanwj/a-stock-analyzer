@@ -22,6 +22,7 @@ import pandas as pd
 from data.fetcher import DataFetcher
 from single_grader import grade_single
 from news_scorer import compute_news_score
+from strategies import get_dim_weights, list_strategies
 
 
 def normalize_code(code: str) -> str:
@@ -68,6 +69,8 @@ def main():
                         help="跳过消息面（不拉新闻/公告/研报，速度更快）")
     parser.add_argument("--lookback", type=int, default=90,
                         help="历史回看天数（默认 90 自然日，约 60 交易日）")
+    parser.add_argument("--strategy", default="swing", choices=list_strategies(),
+                        help="交易策略 profile: short_term/swing/trend (默认 swing)")
     args = parser.parse_args()
 
     ts_code = normalize_code(args.code)
@@ -192,15 +195,19 @@ def main():
         print(f"  [4] 跳过消息面 (--no-news)")
 
     # ---- 5) 评级 ----
+    dim_weights = get_dim_weights(args.strategy)
     rating = grade_single(ts_code=ts_code, name=name, asof=asof,
-                          factor_values=factor_values)
+                          factor_values=factor_values,
+                          dim_weights=dim_weights,
+                          strategy=args.strategy)
 
     print()
     print(rating.to_report())
 
     # 保存评级结果
     os.makedirs("output", exist_ok=True)
-    out_path = os.path.join("output", f"rating_{ts_code.replace('.', '_')}_{asof}.txt")
+    out_path = os.path.join("output",
+                            f"rating_{ts_code.replace('.', '_')}_{args.strategy}_{asof}.txt")
     with open(out_path, "w", encoding="utf-8") as f:
         f.write(rating.to_report())
     print(f"\n评级报告已保存: {out_path}")

@@ -233,13 +233,15 @@ class StockRating:
     asof: str
     dimensions: List[DimensionScore]
     raw_values: dict   # {因子名: 原始数值}，用于追溯
+    dim_weights: dict = field(default_factory=lambda: dict(DIM_WEIGHTS))
+    strategy: str = "swing"
 
     @property
     def overall_stars(self) -> Optional[float]:
         weighted, total_w = 0.0, 0.0
         for d in self.dimensions:
             if d.stars is not None:
-                w = DIM_WEIGHTS.get(d.key, 1.0)
+                w = self.dim_weights.get(d.key, 1.0)
                 weighted += d.stars * w
                 total_w += w
         if total_w == 0:
@@ -262,7 +264,7 @@ class StockRating:
         sep = "=" * 60
         lines.append(sep)
         title = f"{self.ts_code} {self.name or ''}".strip()
-        lines.append(f"  {title}    截面日: {self.asof}")
+        lines.append(f"  {title}    截面日: {self.asof}    策略: {self.strategy}")
         lines.append(sep)
 
         overall = self.overall_stars
@@ -275,10 +277,11 @@ class StockRating:
 
         for d in self.dimensions:
             avg = d.stars
+            dim_w = self.dim_weights.get(d.key, 1.0)
             if avg is None:
-                lines.append(f"【{d.label}】 数据不可用")
+                lines.append(f"【{d.label}】 数据不可用  [w={dim_w}]")
             else:
-                lines.append(f"【{d.label}】 {_stars(round(avg))}   ({avg:.2f}/5)")
+                lines.append(f"【{d.label}】 {_stars(round(avg))}   ({avg:.2f}/5)  [w={dim_w}]")
             for f in d.factors:
                 if f.stars is None:
                     lines.append(f"   · {f.key:<18}  -    {f.desc}")
@@ -293,12 +296,14 @@ class StockRating:
 # ----------------------------------------------------------------------
 # 入口
 # ----------------------------------------------------------------------
-def grade_single(ts_code: str, name: str, asof: str, factor_values: dict) -> StockRating:
+def grade_single(ts_code: str, name: str, asof: str, factor_values: dict,
+                 dim_weights: dict = None, strategy: str = "swing") -> StockRating:
     """从一组因子原始值生成评级
 
-    factor_values: 例如
-        {"mom_30": 0.18, "reversal_5": -0.02, "low_vol": 0.28, "liquidity": 3.5,
-         "pe_ttm": 22, "pb": 2.8, "fund_net_5d": 2.3e8, "inflow_ratio_5d": 0.12}
+    Args:
+        factor_values: {因子名: 原始值} 字典
+        dim_weights: 维度权重字典；None 时用默认 DIM_WEIGHTS
+        strategy: 策略名（仅用于报告展示）
     """
     dims = []
     for dim_key, dim_info in DIM_FACTORS.items():
@@ -308,5 +313,9 @@ def grade_single(ts_code: str, name: str, asof: str, factor_values: dict) -> Sto
             stars, desc = SCORERS[fkey](v)
             d.factors.append(FactorScore(key=fkey, stars=stars, desc=desc, raw_value=v))
         dims.append(d)
-    return StockRating(ts_code=ts_code, name=name, asof=asof,
-                       dimensions=dims, raw_values=factor_values)
+    return StockRating(
+        ts_code=ts_code, name=name, asof=asof,
+        dimensions=dims, raw_values=factor_values,
+        dim_weights=dim_weights or dict(DIM_WEIGHTS),
+        strategy=strategy,
+    )

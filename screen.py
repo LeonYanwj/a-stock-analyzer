@@ -23,6 +23,7 @@ from universe import get_universe
 from factors import compute_all_factors
 from selector import score, top_n
 from news_scorer import compute_news_score
+from strategies import get_factor_weights, list_strategies
 
 
 LOOKBACK_DAYS = 60
@@ -59,6 +60,8 @@ def main():
     parser.add_argument("--limit", type=int, default=0, help="限制股票数量（0=不限制）")
     parser.add_argument("--top", type=int, default=TOP_N, help="选股 Top N")
     parser.add_argument("--lookback", type=int, default=LOOKBACK_DAYS, help="历史回看天数")
+    parser.add_argument("--strategy", default="swing", choices=list_strategies(),
+                        help="交易策略 profile: short_term/swing/trend (默认 swing)")
     parser.add_argument("--news", action="store_true",
                         help="开启消息面二次精筛（对 Top --refine 候选拉新闻+公告+研报）")
     parser.add_argument("--refine", type=int, default=100,
@@ -112,11 +115,12 @@ def main():
     if not lxsz_df.empty and "lxsz_days" in lxsz_df.columns:
         panel = panel.merge(lxsz_df[["ts_code", "lxsz_days"]], on="ts_code", how="left")
 
-    # 4. 因子 + 打分
-    print("\n[4/4] 计算因子 + 打分排序...")
+    # 4. 因子 + 打分（按策略选权重）
+    print(f"\n[4/4] 计算因子 + 打分排序... (strategy={args.strategy})")
     factors = compute_all_factors(panel, asof_date=asof)
     print(f"  因子表: {factors.shape[0]} 只 × {factors.shape[1]} 因子")
-    scored = score(factors)
+    weights = get_factor_weights(args.strategy)
+    scored = score(factors, weights=weights)
 
     # 4.5  消息面二次精筛（可选，--news 开启）
     if args.news:
@@ -154,7 +158,7 @@ def main():
     out = out[[c for c in cols if c in out.columns]]
 
     os.makedirs("output", exist_ok=True)
-    out_path = os.path.join("output", f"picks_{asof}.csv")
+    out_path = os.path.join("output", f"picks_{args.strategy}_{asof}.csv")
     out.to_csv(out_path, encoding="utf-8-sig")
     print(f"\n选股结果已保存: {out_path}")
 
