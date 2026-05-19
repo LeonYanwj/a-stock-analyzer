@@ -164,6 +164,8 @@ def main():
     parser.add_argument("--rebal-weeks", type=int, default=2)
     parser.add_argument("--strategy", default="swing")
     parser.add_argument("--stoploss", type=float, default=-0.08)
+    parser.add_argument("--end-date", default=None,
+                        help="回测结束日 YYYYMMDD，默认今天。用于历史窗口验证。")
     args = parser.parse_args()
 
     print("=" * 60)
@@ -171,7 +173,10 @@ def main():
     print("=" * 60)
 
     fetcher = DataFetcher()
-    end_dt = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+    if args.end_date:
+        end_dt = datetime.strptime(args.end_date, "%Y%m%d")
+    else:
+        end_dt = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
     test_start = end_dt - timedelta(days=args.test_months * 31)
     train_start = test_start - timedelta(days=args.train_months * 31)
     fetch_start = (train_start - timedelta(days=args.lookback + 30)).strftime("%Y%m%d")
