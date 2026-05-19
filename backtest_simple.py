@@ -144,13 +144,17 @@ def fetch_benchmark(fetcher: DataFetcher, start_date: str, end_date: str) -> pd.
 
 def main():
     parser = argparse.ArgumentParser(description="半年量价因子回测")
-    parser.add_argument("--months", type=int, default=6, help="回测月数（默认 6）")
+    parser.add_argument("--months", type=int, default=12, help="回测月数（默认 12 = 1 年）")
     parser.add_argument("--limit", type=int, default=300, help="股票池规模（默认 300）")
     parser.add_argument("--top", type=int, default=50, help="每周选股数（默认 50）")
     parser.add_argument("--lookback", type=int, default=60, help="因子计算回看天数")
     parser.add_argument("--strategy", default="swing", choices=list_strategies())
     parser.add_argument("--rebal-weeks", type=int, default=1,
                         help="调仓间隔（周）：1=每周(短线), 2=每两周(波段), 4=每月(中长期)")
+    parser.add_argument("--stoploss", type=float, default=-0.08,
+                        help="持仓期止损线（默认 -8%）。设 0 关闭。")
+    parser.add_argument("--ic", action="store_true",
+                        help="输出因子 IC 分析（每个因子的 RankIC/IR）")
     args = parser.parse_args()
 
     print("=" * 60)
@@ -192,16 +196,18 @@ def main():
     print(f"  使用因子权重: {tech_weights}")
 
     # 4. 滑窗回测主循环
-    print(f"\n[4/4] 滑窗回测...")
+    print(f"\n[4/4] 滑窗回测... 止损线={args.stoploss*100:.0f}%")
     weekly_returns = []
-    chosen_log = []  # 每周选的股票
+    chosen_log = []
+    stoploss_count = 0     # 累计触发止损股数
+    ic_records = []        # 每期各因子的 IC（用于 IC 分析）
     equity = [1.0]
+    factor_keys = list(tech_weights.keys())
 
     for i in range(len(rebal_dates) - 1):
         t = rebal_dates[i]
         t_next = rebal_dates[i + 1]
         t_dt = pd.to_datetime(t)
-        # 截取 [t-lookback, t] 的 panel
         cutoff_start = t_dt - timedelta(days=args.lookback + 30)
         window = panel_all[(panel_all["trade_date"] >= cutoff_start) &
                           (panel_all["trade_date"] <= t_dt)]
@@ -209,7 +215,6 @@ def main():
             print(f"  {t}: 数据太少（{window['ts_code'].nunique()} 只），跳过")
             continue
 
-        # 算因子 + 打分
         try:
             factors = compute_all_factors(window, asof_date=t)
             scored = score(factors, weights=tech_weights, min_valid_factors=3)
@@ -222,29 +227,71 @@ def main():
             continue
         picked_codes = picks.index.tolist()
 
-        # 计算 [t, t_next] 各只的收益
+        # 计算 [t, t_next] 各只的收益（含止损）
         rets = []
+        period_returns_map = {}   # ts_code -> 周收益（含止损后）
         for tc in picked_codes:
-            stock_window = panel_all[(panel_all["ts_code"] == tc) &
-                                      (panel_all["trade_date"] >= t_dt) &
-                                      (panel_all["trade_date"] <= pd.to_datetime(t_next))]
-            if len(stock_window) < 2:
+            sw = panel_all[(panel_all["ts_code"] == tc) &
+                          (panel_all["trade_date"] >= t_dt) &
+                          (panel_all["trade_date"] <= pd.to_datetime(t_next))]
+            if len(sw) < 2:
                 continue
-            close_start = stock_window.iloc[0]["close"]
-            close_end = stock_window.iloc[-1]["close"]
-            if pd.isna(close_start) or pd.isna(close_end) or close_start <= 0:
+            close_start = sw.iloc[0]["close"]
+            if pd.isna(close_start) or close_start <= 0:
                 continue
-            ret = close_end / close_start - 1
+            # 持仓期间逐日收益
+            sw_ret = sw["close"] / close_start - 1
+            if args.stoploss < 0:
+                # 检查是否触发止损
+                hit = sw_ret[sw_ret <= args.stoploss]
+                if not hit.empty:
+                    # 触发止损：按止损价 + 一点滑点平仓
+                    ret = args.stoploss - 0.002
+                    stoploss_count += 1
+                else:
+                    ret = sw.iloc[-1]["close"] / close_start - 1
+            else:
+                ret = sw.iloc[-1]["close"] / close_start - 1
+            if pd.isna(ret):
+                continue
             rets.append(ret)
+            period_returns_map[tc] = ret
 
         if not rets:
             continue
 
-        # 等权组合本周收益（扣双边手续费）
+        # 等权组合本期收益（扣双边手续费）
         port_ret = float(np.mean(rets)) - COMMISSION_TWO_WAY
         weekly_returns.append(port_ret)
         equity.append(equity[-1] * (1 + port_ret))
         chosen_log.append({"date": t, "n_picks": len(rets), "return": port_ret})
+
+        # ---- IC 分析：本期各因子值 vs 全市场实际收益的秩相关 ----
+        if args.ic:
+            # 算全市场（不只是 picks）下周收益，与因子横截面做 RankIC
+            all_codes = factors.index.tolist()
+            next_ret = {}
+            for tc in all_codes:
+                sw = panel_all[(panel_all["ts_code"] == tc) &
+                              (panel_all["trade_date"] >= t_dt) &
+                              (panel_all["trade_date"] <= pd.to_datetime(t_next))]
+                if len(sw) >= 2 and sw.iloc[0]["close"] > 0:
+                    r = sw.iloc[-1]["close"] / sw.iloc[0]["close"] - 1
+                    if not pd.isna(r):
+                        next_ret[tc] = r
+            if len(next_ret) >= 30:
+                ret_series = pd.Series(next_ret)
+                ic_row = {"date": t}
+                for fk in factor_keys:
+                    if fk in factors.columns:
+                        f_series = factors[fk].dropna()
+                        common = f_series.index.intersection(ret_series.index)
+                        if len(common) >= 30:
+                            # 手动 rank+pearson = spearman 等价（不依赖 scipy）
+                            f_rank = f_series.loc[common].rank()
+                            r_rank = ret_series.loc[common].rank()
+                            ic_row[fk] = float(f_rank.corr(r_rank, method="pearson"))
+                ic_records.append(ic_row)
 
         print(f"  {t} -> {t_next}: 选 {len(picked_codes)} 只, 周收益 {port_ret*100:+.2f}%, "
               f"累计净值 {equity[-1]:.4f}")
@@ -273,11 +320,34 @@ def main():
     print(f"  夏普比率:     {metrics['sharpe']:.2f}")
     print(f"  最大回撤:     {metrics['max_drawdown']*100:+.2f}%")
     print(f"  胜率:         {metrics['win_rate']*100:.1f}%")
+    if args.stoploss < 0:
+        print(f"  止损触发:     {stoploss_count} 次（阈值 {args.stoploss*100:.0f}%）")
     if bm_ret is not None:
         excess = metrics["total_return"] - bm_ret
         print(f"  ---")
         print(f"  沪深300同期: {bm_ret*100:+.2f}%")
         print(f"  超额收益:     {excess*100:+.2f}%")
+
+    # IC 分析输出
+    if args.ic and ic_records:
+        ic_df = pd.DataFrame(ic_records).set_index("date")
+        print("\n" + "=" * 60)
+        print("因子 IC 分析（RankIC，正值=因子大者未来收益高）")
+        print("=" * 60)
+        print(f"{'因子':<15} {'IC均值':>10} {'IC标准差':>10} {'IR':>8} {'IC>0比例':>10}")
+        ic_summary = []
+        for fk in factor_keys:
+            if fk in ic_df.columns:
+                s = ic_df[fk].dropna()
+                if len(s) >= 3:
+                    mean = s.mean()
+                    std = s.std()
+                    ir = mean / std if std > 0 else 0
+                    win = (s > 0).sum() / len(s)
+                    ic_summary.append((fk, mean, std, ir, win))
+                    flag = " ★" if abs(mean) >= 0.03 else ""
+                    print(f"{fk:<15} {mean:>+10.4f} {std:>10.4f} {ir:>+8.2f} {win*100:>9.1f}%{flag}")
+        print("\n  解读：IC|均值| >= 0.03 算有效（带★），IR >= 0.5 算稳定")
 
     # 保存结果
     os.makedirs("output", exist_ok=True)
