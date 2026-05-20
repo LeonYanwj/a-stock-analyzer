@@ -232,6 +232,53 @@ def insert_backtest_position(conn, run_id: int, positions_df: pd.DataFrame) -> i
     return upsert_df(conn, "backtest_position", df[cols])
 
 
+def insert_backtest_factor_ic(conn, run_id: int, ic_df: pd.DataFrame) -> int:
+    """写入每期因子 IC；需含 rebal_date, factor_name, ic"""
+    df = ic_df.copy()
+    df["run_id"] = run_id
+    cols = ["run_id", "rebal_date", "factor_name", "ic"]
+    df = df[[c for c in cols if c in df.columns]]
+    return upsert_df(conn, "backtest_factor_ic", df)
+
+
+def list_backtest_runs(conn, strategy_name: str = None, limit: int = 20) -> pd.DataFrame:
+    """列出历史回测记录"""
+    if strategy_name:
+        sql = ("SELECT r.run_id, s.strategy_name, r.start_date, r.end_date, "
+               "r.ann_return, r.sharpe, r.max_drawdown, r.win_rate, r.n_periods, "
+               "r.note, r.created_at "
+               "FROM backtest_run r JOIN strategy_config s USING(strategy_id) "
+               "WHERE s.strategy_name=%s "
+               "ORDER BY r.created_at DESC LIMIT %s")
+        return pd.read_sql(sql, conn, params=(strategy_name, limit))
+    else:
+        sql = ("SELECT r.run_id, s.strategy_name, r.start_date, r.end_date, "
+               "r.ann_return, r.sharpe, r.max_drawdown, r.win_rate, r.n_periods, "
+               "r.note, r.created_at "
+               "FROM backtest_run r JOIN strategy_config s USING(strategy_id) "
+               "ORDER BY r.created_at DESC LIMIT %s")
+        return pd.read_sql(sql, conn, params=(limit,))
+
+
+def get_backtest_detail(conn, run_id: int) -> dict:
+    """查某次回测的详细信息（持仓/净值/IC）"""
+    run = pd.read_sql(
+        "SELECT * FROM backtest_run WHERE run_id=%s", conn, params=(run_id,))
+    if run.empty:
+        return None
+    equity = pd.read_sql(
+        "SELECT * FROM backtest_equity WHERE run_id=%s ORDER BY rebal_date",
+        conn, params=(run_id,))
+    positions = pd.read_sql(
+        "SELECT * FROM backtest_position WHERE run_id=%s ORDER BY rebal_date, rank_num",
+        conn, params=(run_id,))
+    ic = pd.read_sql(
+        "SELECT * FROM backtest_factor_ic WHERE run_id=%s ORDER BY rebal_date, factor_name",
+        conn, params=(run_id,))
+    return {"run": run.iloc[0].to_dict(), "equity": equity,
+            "positions": positions, "ic": ic}
+
+
 # ----------------------------------------------------------------------
 # 工具
 # ----------------------------------------------------------------------

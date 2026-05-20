@@ -217,6 +217,22 @@ def main():
     tech_weights = _filter_tech_weights(full_weights)
     print(f"  使用因子权重: {tech_weights}")
 
+    # ---- 创建 backtest_run 记录（拿到 run_id）----
+    run_id = None
+    try:
+        from data.db import get_conn, get_strategy, create_backtest_run
+        with get_conn() as conn:
+            strat = get_strategy(conn, args.strategy)
+            if strat:
+                run_id = create_backtest_run(
+                    conn, strat["strategy_id"], start_dt, end_dt,
+                    initial_capital=1.0,
+                    note=f"limit={args.limit} top={args.top} "
+                         f"rebal={args.rebal_weeks}w sl={args.stoploss}")
+        print(f"  DB run_id: {run_id}")
+    except Exception as e:
+        print(f"  [warn] DB run 创建失败（不影响回测）: {type(e).__name__}: {e}")
+
     # 4. 滑窗回测主循环
     print(f"\n[4/4] 滑窗回测... 止损线={args.stoploss*100:.0f}%")
     weekly_returns = []
@@ -225,6 +241,10 @@ def main():
     ic_records = []        # 每期各因子的 IC（用于 IC 分析）
     equity = [1.0]
     factor_keys = list(tech_weights.keys())
+    # 累积用于 DB 写入
+    db_positions = []   # 每期持仓明细
+    db_equity = []      # 每期净值
+    db_ic = []          # 每期 IC
 
     for i in range(len(rebal_dates) - 1):
         t = rebal_dates[i]
@@ -288,6 +308,28 @@ def main():
         equity.append(equity[-1] * (1 + port_ret))
         chosen_log.append({"date": t, "n_picks": len(rets), "return": port_ret})
 
+        # 累积持仓明细 + 净值 用于 DB 写入
+        if run_id:
+            db_equity.append({
+                "rebal_date": t_next,
+                "equity": equity[-1],
+                "period_return": port_ret,
+            })
+            picks_dict = picks["score"].to_dict() if "score" in picks.columns else {}
+            for rank, tc in enumerate(picked_codes, 1):
+                if tc not in period_returns_map:
+                    continue
+                ret = period_returns_map[tc]
+                db_positions.append({
+                    "rebal_date": t,
+                    "ts_code": tc,
+                    "rank_num": rank,
+                    "weight": 1.0 / len(picked_codes),
+                    "factor_score": picks_dict.get(tc),
+                    "period_return": ret,
+                    "stoploss_hit": 1 if ret <= args.stoploss else 0,
+                })
+
         # ---- IC 分析：本期各因子值 vs 全市场实际收益的秩相关 ----
         if args.ic:
             # 算全市场（不只是 picks）下周收益，与因子横截面做 RankIC
@@ -314,6 +356,16 @@ def main():
                             r_rank = ret_series.loc[common].rank()
                             ic_row[fk] = float(f_rank.corr(r_rank, method="pearson"))
                 ic_records.append(ic_row)
+                if run_id:
+                    # 把本期各因子 IC 也累积准备入库
+                    for fk, ic_val in ic_row.items():
+                        if fk == "date":
+                            continue
+                        db_ic.append({
+                            "rebal_date": t,
+                            "factor_name": fk,
+                            "ic": ic_val,
+                        })
 
         print(f"  {t} -> {t_next}: 选 {len(picked_codes)} 只, 周收益 {port_ret*100:+.2f}%, "
               f"累计净值 {equity[-1]:.4f}")
@@ -349,6 +401,27 @@ def main():
         print(f"  ---")
         print(f"  沪深300同期: {bm_ret*100:+.2f}%")
         print(f"  超额收益:     {excess*100:+.2f}%")
+
+    # ---- 把本次回测结果写入 DB（不影响主流程）----
+    if run_id:
+        try:
+            from data.db import (get_conn, finalize_backtest_run,
+                                insert_backtest_equity, insert_backtest_position,
+                                insert_backtest_factor_ic)
+            with get_conn() as conn:
+                metrics_db = dict(metrics)
+                metrics_db["final_value"] = float(equity[-1])
+                finalize_backtest_run(conn, run_id, metrics_db)
+                if db_equity:
+                    insert_backtest_equity(conn, run_id, pd.DataFrame(db_equity))
+                if db_positions:
+                    insert_backtest_position(conn, run_id, pd.DataFrame(db_positions))
+                if db_ic:
+                    insert_backtest_factor_ic(conn, run_id, pd.DataFrame(db_ic))
+            print(f"\n  [DB] run_id={run_id}: 持仓 {len(db_positions)} 条, "
+                  f"净值 {len(db_equity)} 条, IC {len(db_ic)} 条已入库")
+        except Exception as e:
+            print(f"\n  [warn] DB 写入失败: {type(e).__name__}: {e}")
 
     # IC 分析输出
     if args.ic and ic_records:

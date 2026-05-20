@@ -39,11 +39,14 @@ Tier 4: 实盘 / ML     → 接券商 API、机器学习增强
 
 | Tier | 模块 | 进度 |
 |------|------|:----:|
-| 1 | 量化研究平台 | █████████░ 80% |
-| 2 | 数据基础设施 | █████████░ 85% |
+| 1 | 量化研究平台 | █████████░ 85% |
+| 2 | 数据基础设施 | █████████░ 88% |
 | 3 | 模拟盘 | ░░░░░░░░░░ 0% |
 | 4 | 实盘 / ML / 高级 | ░░░░░░░░░░ 0% |
-| | **整体** | **████░░░░░░ 40%** |
+| | **整体** | **█████░░░░░ 45%** |
+
+**最新动态**：backtest_simple.py 已集成 DB 写入（每次回测自动存档），
+新增 `query_backtest.py` 历史回测查询工具。
 
 ---
 
@@ -67,7 +70,8 @@ Tier 4: 实盘 / ML     → 接券商 API、机器学习增强
 | | `rate.py` | 单股深度评级 |
 | | `main.py` | 旧单股回测（保留兼容）|
 | | `demo_backtest.py` | 离线回测演示 |
-| **回测/验证** | `backtest_simple.py` | 基础回测（IC 分析 + 止损）|
+| | `query_backtest.py` | **历史回测查询工具（新）** |
+| **回测/验证** | `backtest_simple.py` | 基础回测（IC + 止损 + DB 写入）|
 | | `backtest_rolling.py` | 动态滚动调权重 |
 | | `walk_forward.py` | 样本外验证 |
 | | `multi_window.py` | 多窗口验证 |
@@ -88,7 +92,7 @@ Tier 4: 实盘 / ML     → 接券商 API、机器学习增强
 | `market_trade_calendar` | 0 | ❌ 待初始化 |
 | `market_universe_snapshot` | 0 | ❌ 待积累 |
 | `strategy_config` | 3 | ✅ short_term / swing / trend |
-| `backtest_*` (4 张) | 0 | ❌ 待改造 backtest 写入 |
+| `backtest_run` 等 (4 张) | 累积中 | ✅ **每次 backtest_simple.py 自动写入** |
 | `paper_*` (5 张) | 0 | ⏳ Phase 2 模拟盘占位 |
 
 ### 3.3 14 个因子（5 维度）
@@ -130,6 +134,11 @@ python backtest_simple.py --months 6 --strategy swing --rebal-weeks 2 --ic
 python backtest_rolling.py --start-year 2022 --end-year 2024
 python walk_forward.py --end-date 20250517
 python multi_window.py --start-year 2022 --end-year 2024
+
+# 查询历史回测（DB 自动存档）
+python query_backtest.py                       # 列出最近 20 次
+python query_backtest.py --run 5               # 查看第 5 次详情
+python query_backtest.py --compare 3 5 7       # 对比多次
 ```
 
 ### 数据初始化（一次性）
@@ -144,7 +153,8 @@ python init_data.py --limit 2000              # 全市场 stock_basic + 估值
 
 ### 短期（完善 Tier 1/2，1-3 天工作量）
 - [ ] 接入财务数据 `market_financial`（ROE/毛利率全市场入库）
-- [ ] 改造 backtest 写入 `backtest_*` 表（每次回测可追溯/复盘）
+- [x] ~~改造 backtest 写入 `backtest_*` 表~~ ✅ 已完成（含 query_backtest.py）
+- [ ] 把 DB 写入扩展到 backtest_rolling / walk_forward / multi_window
 - [ ] 改造 fetcher.get_fund_flow_snapshot 写入 `market_fund_flow`（每日积累）
 - [ ] 初始化 `market_trade_calendar`（一次性脚本）
 - [ ] 改进手续费模型（精确化最低 5 元佣金 + 印花税分离）
