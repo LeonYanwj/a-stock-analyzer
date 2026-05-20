@@ -466,17 +466,37 @@ class DataFetcher:
     def get_daily(self, ts_code, start_date, end_date, adjust="qfq", source="sina"):
         """获取单股历史日线，统一英文字段
 
+        优先级：MySQL DB（最快）-> CSV cache（兼容旧版）-> API（最后兜底）
+
         Args:
             ts_code: 如 '000001.SZ'
             start_date / end_date: 'YYYYMMDD'
             adjust: '' 不复权 / 'qfq' 前复权 / 'hfq' 后复权
             source: 'sina' 新浪（稳，含换手率）/ 'em' 东财（批量易反爬）/ 'tx' 腾讯（轻量）
         """
+        # ---- 优先级 1: MySQL DB（如果完全覆盖请求范围）----
+        try:
+            from data.db import get_conn, query_daily, query_daily_coverage
+            sd = pd.to_datetime(start_date if "-" in str(start_date)
+                                else f"{str(start_date)[:4]}-{str(start_date)[4:6]}-{str(start_date)[6:]}")
+            ed = pd.to_datetime(end_date if "-" in str(end_date)
+                                else f"{str(end_date)[:4]}-{str(end_date)[4:6]}-{str(end_date)[6:]}")
+            with get_conn() as conn:
+                min_d, max_d = query_daily_coverage(conn, ts_code, adjust)
+                if (min_d is not None and max_d is not None
+                        and pd.to_datetime(min_d) <= sd
+                        and pd.to_datetime(max_d) >= ed):
+                    return query_daily(conn, ts_code, start_date, end_date, adjust)
+        except Exception:
+            pass  # DB 不可用，往下走
+
+        # ---- 优先级 2: CSV cache（兼容旧版本）----
         cache_name = f"daily_{ts_code}_{start_date}_{end_date}_{adjust or 'raw'}"
         cached = self._load_cache(cache_name)
         if cached is not None:
             return cached
 
+        # ---- 优先级 3: 调 API ----
         try:
             if source == "sina":
                 sym = ts_code_to_sina_symbol(ts_code)
@@ -534,6 +554,15 @@ class DataFetcher:
             if c in df.columns:
                 df[c] = pd.to_numeric(df[c], errors="coerce")
         self._save_cache(cache_name, df)
+
+        # 写回 DB（不影响返回，失败 silent）
+        try:
+            from data.db import get_conn, upsert_daily
+            with get_conn() as conn:
+                upsert_daily(conn, df, adjust=adjust)
+        except Exception:
+            pass
+
         return df
 
     # ------------------------------------------------------------------
