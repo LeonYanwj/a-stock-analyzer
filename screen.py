@@ -23,7 +23,8 @@ from universe import get_universe
 from factors import compute_all_factors
 from selector import score, top_n
 from news_scorer import compute_news_score
-from strategies import get_factor_weights, list_strategies
+from strategies import (get_factor_weights, list_strategies,
+                        calc_optimal_top_n, warn_if_capital_too_small)
 
 
 LOOKBACK_DAYS = 60
@@ -58,7 +59,10 @@ def fetch_history_panel(fetcher: DataFetcher, ts_codes, start, end) -> pd.DataFr
 def main():
     parser = argparse.ArgumentParser(description="沪深主板多因子选股")
     parser.add_argument("--limit", type=int, default=0, help="限制股票数量（0=不限制）")
-    parser.add_argument("--top", type=int, default=TOP_N, help="选股 Top N")
+    parser.add_argument("--top", type=int, default=0,
+                        help="选股 Top N（默认 0=自动按 --capital 算；都不传则用 50）")
+    parser.add_argument("--capital", type=float, default=0,
+                        help="资金量（元），自动映射持仓数。如 --capital 100000 → 持仓 10 只")
     parser.add_argument("--lookback", type=int, default=LOOKBACK_DAYS, help="历史回看天数")
     parser.add_argument("--strategy", default="swing", choices=list_strategies(),
                         help="交易策略 profile: short_term/swing/trend (默认 swing)")
@@ -69,6 +73,20 @@ def main():
     parser.add_argument("--news-weight", type=float, default=0.15,
                         help="news_score 加分系数（每 1 分 ~ 加 0.15 到总分）")
     args = parser.parse_args()
+
+    # 持仓数：优先 --top, 其次 --capital 算，最后 50 默认
+    if args.top > 0:
+        top_actual = args.top
+    elif args.capital > 0:
+        top_actual = calc_optimal_top_n(args.capital)
+        warn = warn_if_capital_too_small(args.capital)
+        if warn:
+            print(warn)
+        print(f"[资金 {args.capital:,.0f} 元 → 持仓 {top_actual} 只 "
+              f"(每只 ~{args.capital/top_actual:,.0f} 元)]")
+    else:
+        top_actual = TOP_N
+    args.top = top_actual
 
     print("=" * 60)
     print("沪深主板多因子选股（AKShare）")

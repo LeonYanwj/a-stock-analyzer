@@ -30,7 +30,8 @@ from data.fetcher import DataFetcher
 from universe import get_universe
 from factors import compute_all_factors
 from selector import score, top_n
-from strategies import get_factor_weights, list_strategies
+from strategies import (get_factor_weights, list_strategies,
+                        calc_optimal_top_n, warn_if_capital_too_small)
 
 
 # 7 个量价因子（其他因子在历史回测中不可用，权重置 0）
@@ -146,7 +147,10 @@ def main():
     parser = argparse.ArgumentParser(description="半年量价因子回测")
     parser.add_argument("--months", type=int, default=12, help="回测月数（默认 12 = 1 年）")
     parser.add_argument("--limit", type=int, default=300, help="股票池规模（默认 300）")
-    parser.add_argument("--top", type=int, default=50, help="每周选股数（默认 50）")
+    parser.add_argument("--top", type=int, default=0,
+                        help="每周选股数（默认 0=按 --capital 自动算，都不传则用 50）")
+    parser.add_argument("--capital", type=float, default=0,
+                        help="模拟资金量（元），自动映射持仓数")
     parser.add_argument("--lookback", type=int, default=60, help="因子计算回看天数")
     parser.add_argument("--strategy", default="swing", choices=list_strategies())
     parser.add_argument("--rebal-weeks", type=int, default=1,
@@ -156,6 +160,18 @@ def main():
     parser.add_argument("--ic", action="store_true",
                         help="输出因子 IC 分析（每个因子的 RankIC/IR）")
     args = parser.parse_args()
+
+    # 持仓数：优先 --top, 其次 --capital 自动算，最后 50
+    if args.top > 0:
+        pass
+    elif args.capital > 0:
+        args.top = calc_optimal_top_n(args.capital)
+        warn = warn_if_capital_too_small(args.capital)
+        if warn:
+            print(warn)
+        print(f"[资金 {args.capital:,.0f} → 持仓 {args.top} 只]")
+    else:
+        args.top = 50
 
     print("=" * 60)
     print(f"回测: 策略={args.strategy}  月数={args.months}  Top={args.top}  股票池={args.limit}")

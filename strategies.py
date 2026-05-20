@@ -131,3 +131,68 @@ def get_dim_weights(strategy: str) -> dict:
 
 def list_strategies() -> list:
     return list(FACTOR_PROFILES.keys())
+
+
+# ----------------------------------------------------------------------
+# 根据资金量自动算合理持仓数
+# ----------------------------------------------------------------------
+def calc_optimal_top_n(capital: float) -> int:
+    """根据资金量按经验规则返回持仓数。
+
+    A 股佣金有"最低 5 元/笔"规则：
+    - 单笔成交额 ≥ 5000 元，佣金占比 ≤ 0.1%（接近万一标牌价）
+    - 单笔成交额 < 5000 元，被强制收 5 元，等于变相提价
+    - 例如：单笔 1000 元，佣金 5 元 = 0.5%（双边 1%）
+
+    所以核心约束是：**单股仓位 ≥ 5000 元**。
+    （并非"能买 1 手"那么简单，因为 1 手才 1500 元的话佣金占比飙到 0.33%）
+
+    Args:
+        capital: 总资金（元）
+
+    Returns:
+        建议持仓数（3/5/8/10/15/25/40/60 中的一个）
+
+    设计哲学：
+    - 学术研究：8-12 只能消除 80%+ 特质风险，再多收益递减
+    - 散户实战：3-10 只重仓博精选更符合个人习惯
+    - 持仓 < 5 只确实有单股黑天鹅风险（一只跌停 ~ -3~5% 组合）
+    """
+    if capital < 30_000:       return 3    # < 3 万：每只 ~10000，重仓博精选
+    if capital < 50_000:       return 5    # 3-5 万：每只 ~8000
+    if capital < 100_000:      return 8    # 5-10 万：每只 ~10000，5-7 行业
+    if capital < 300_000:      return 10   # 10-30 万：每只 ~20000
+    if capital < 1_000_000:    return 15   # 30-100 万：每只 ~40000
+    if capital < 3_000_000:    return 25   # 100-300 万
+    if capital < 10_000_000:   return 40   # 300-1000 万
+    return 60                               # > 1000 万（大资金避免单只冲击）
+
+
+def warn_if_capital_too_small(capital: float) -> str:
+    """资金太小时返回警告文本（< 5 万很难跑多因子策略）"""
+    if capital < 30_000:
+        return ("[警告] 资金 < 3 万：多因子等权策略的手续费消耗很大"
+                "（最低 5 元佣金占比 > 0.1%）。建议改买 ETF（如 510300 沪深300）"
+                "或减少换仓频率到月度。")
+    if capital < 50_000:
+        return ("[提示] 资金 < 5 万：持仓数已限制到 5 只。"
+                "建议调仓频率改为月度（--rebal-weeks 4）降低手续费。")
+    return ""
+
+
+def describe_capital_to_top_n(capital: float) -> str:
+    """返回友好描述：资金 -> 持仓数 -> 单股仓位"""
+    n = calc_optimal_top_n(capital)
+    per_pos = capital / n
+    return (f"资金 {capital:>12,.0f} → 持仓 {n:>3} 只 "
+            f"(每只 ~{per_pos:>8,.0f} 元)")
+
+
+if __name__ == "__main__":
+    # 自检：常见档位
+    print("资金 -> 持仓数 映射表（考虑最低 5 元佣金陷阱）")
+    print("-" * 60)
+    for c in [20000, 40000, 80000, 200000, 500000, 1500000, 5000000, 20000000, 50000000]:
+        line = describe_capital_to_top_n(c)
+        warn = warn_if_capital_too_small(c)
+        print(line, "  " + warn if warn else "")
