@@ -31,7 +31,8 @@ from universe import get_universe
 from factors import compute_all_factors
 from selector import score, top_n
 from strategies import (get_factor_weights, list_strategies,
-                        calc_optimal_top_n, warn_if_capital_too_small)
+                        calc_optimal_top_n, warn_if_capital_too_small,
+                        position_range, validate_top_n)
 
 
 # 7 个量价因子（其他因子在历史回测中不可用，权重置 0）
@@ -161,15 +162,20 @@ def main():
                         help="输出因子 IC 分析（每个因子的 RankIC/IR）")
     args = parser.parse_args()
 
-    # 持仓数：优先 --top, 其次 --capital 自动算，最后 50
+    # 持仓数：传 --top 用用户值（同传 --capital 时检查区间）；
+    #         只传 --capital 用推荐值；都不传用 50
     if args.top > 0:
-        pass
+        if args.capital > 0:
+            warn = validate_top_n(args.top, args.capital)
+            if warn:
+                print(warn)
     elif args.capital > 0:
+        mn, mx = position_range(args.capital)
         args.top = calc_optimal_top_n(args.capital)
         warn = warn_if_capital_too_small(args.capital)
         if warn:
             print(warn)
-        print(f"[资金 {args.capital:,.0f} → 持仓 {args.top} 只]")
+        print(f"[资金 {args.capital:,.0f} → 推荐持仓 {args.top} 只 (区间 [{mn},{mx}])]")
     else:
         args.top = 50
 

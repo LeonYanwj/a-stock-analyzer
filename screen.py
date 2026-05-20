@@ -24,7 +24,8 @@ from factors import compute_all_factors
 from selector import score, top_n
 from news_scorer import compute_news_score
 from strategies import (get_factor_weights, list_strategies,
-                        calc_optimal_top_n, warn_if_capital_too_small)
+                        calc_optimal_top_n, warn_if_capital_too_small,
+                        position_range, validate_top_n)
 
 
 LOOKBACK_DAYS = 60
@@ -74,16 +75,24 @@ def main():
                         help="news_score 加分系数（每 1 分 ~ 加 0.15 到总分）")
     args = parser.parse_args()
 
-    # 持仓数：优先 --top, 其次 --capital 算，最后 50 默认
+    # 持仓数逻辑：
+    # 1. 传 --top: 用用户值；若也传了 --capital，检查是否在合理区间
+    # 2. 只传 --capital: 用推荐值（公式算）
+    # 3. 都不传: 用默认 50
     if args.top > 0:
         top_actual = args.top
+        if args.capital > 0:
+            warn = validate_top_n(top_actual, args.capital)
+            if warn:
+                print(warn)
     elif args.capital > 0:
+        mn, mx = position_range(args.capital)
         top_actual = calc_optimal_top_n(args.capital)
         warn = warn_if_capital_too_small(args.capital)
         if warn:
             print(warn)
-        print(f"[资金 {args.capital:,.0f} 元 → 持仓 {top_actual} 只 "
-              f"(每只 ~{args.capital/top_actual:,.0f} 元)]")
+        print(f"[资金 {args.capital:,.0f} → 推荐持仓 {top_actual} 只 "
+              f"(允许区间 [{mn}, {mx}])  单股 ~{args.capital/top_actual:,.0f} 元]")
     else:
         top_actual = TOP_N
     args.top = top_actual

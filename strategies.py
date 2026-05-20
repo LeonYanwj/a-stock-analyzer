@@ -136,36 +136,57 @@ def list_strategies() -> list:
 # ----------------------------------------------------------------------
 # 根据资金量自动算合理持仓数
 # ----------------------------------------------------------------------
-def calc_optimal_top_n(capital: float) -> int:
-    """根据资金量按经验规则返回持仓数。
+import math
 
-    A 股佣金有"最低 5 元/笔"规则：
-    - 单笔成交额 ≥ 5000 元，佣金占比 ≤ 0.1%（接近万一标牌价）
-    - 单笔成交额 < 5000 元，被强制收 5 元，等于变相提价
-    - 例如：单笔 1000 元，佣金 5 元 = 0.5%（双边 1%）
+# 单股仓位约束（A 股实战经验）
+MIN_PER_POSITION = 5_000      # 单股最少 5000 元（让最低 5 元佣金占比 ≤ 0.1%）
+MAX_PER_POSITION = 100_000    # 单股最多 10 万元（超过后冲击成本上升 + 散户难管理）
+HARD_MIN_N = 3                # 持仓数硬下限（< 3 只单股黑天鹅风险太大）
+HARD_MAX_N = 60               # 持仓数硬上限（> 60 只接近指数化，alpha 被稀释）
 
-    所以核心约束是：**单股仓位 ≥ 5000 元**。
-    （并非"能买 1 手"那么简单，因为 1 手才 1500 元的话佣金占比飙到 0.33%）
 
-    Args:
-        capital: 总资金（元）
+def position_range(capital: float) -> tuple:
+    """根据资金量返回合理持仓数区间 (min_n, max_n)
+
+    设计原则：
+    - 单股仓位 ≥ 5000 元：避免最低 5 元佣金占比飙升
+    - 单股仓位 ≤ 10 万元：避免冲击成本 + 利于散户跟踪
+    - 全局 3-60 只硬上下限
 
     Returns:
-        建议持仓数（3/5/8/10/15/25/40/60 中的一个）
-
-    设计哲学：
-    - 学术研究：8-12 只能消除 80%+ 特质风险，再多收益递减
-    - 散户实战：3-10 只重仓博精选更符合个人习惯
-    - 持仓 < 5 只确实有单股黑天鹅风险（一只跌停 ~ -3~5% 组合）
+        (min_n, max_n) 持仓数允许的区间
     """
-    if capital < 30_000:       return 3    # < 3 万：每只 ~10000，重仓博精选
-    if capital < 50_000:       return 5    # 3-5 万：每只 ~8000
-    if capital < 100_000:      return 8    # 5-10 万：每只 ~10000，5-7 行业
-    if capital < 300_000:      return 10   # 10-30 万：每只 ~20000
-    if capital < 1_000_000:    return 15   # 30-100 万：每只 ~40000
-    if capital < 3_000_000:    return 25   # 100-300 万
-    if capital < 10_000_000:   return 40   # 300-1000 万
-    return 60                               # > 1000 万（大资金避免单只冲击）
+    max_n_by_cost = int(capital / MIN_PER_POSITION)         # 单股 ≥ 5000 反推的最大持仓
+    min_n_by_impact = int(capital / MAX_PER_POSITION)       # 单股 ≤ 10万 反推的最小持仓
+    max_n = max(HARD_MIN_N, min(HARD_MAX_N, max_n_by_cost))
+    min_n = max(HARD_MIN_N, min(max_n, min_n_by_impact))
+    return (min_n, max_n)
+
+
+def calc_optimal_top_n(capital: float) -> int:
+    """在合理区间内的几何中位作为推荐值（不死板，可被 --top 覆盖）
+
+    几何中位 sqrt(min*max) 比算术中位更"中庸"——
+    资金量大时不会被 max=60 拉得太高。
+    """
+    min_n, max_n = position_range(capital)
+    return max(min_n, min(max_n, round(math.sqrt(min_n * max_n))))
+
+
+def validate_top_n(top_n: int, capital: float) -> str:
+    """验证 top_n 是否在合理区间，返回警告文本（OK 时返回空字符串）"""
+    if capital <= 0:
+        return ""
+    min_n, max_n = position_range(capital)
+    if top_n < min_n:
+        per_pos = capital / top_n
+        return (f"[警告] top={top_n} 低于推荐区间 [{min_n}, {max_n}]：单股 {per_pos:,.0f} 元"
+                f"，超过 10万 冲击成本会上升")
+    if top_n > max_n:
+        per_pos = capital / top_n
+        return (f"[警告] top={top_n} 超过推荐区间 [{min_n}, {max_n}]：单股 {per_pos:,.0f} 元"
+                f"，低于 5000 佣金占比会很高")
+    return ""
 
 
 def warn_if_capital_too_small(capital: float) -> str:
@@ -189,10 +210,12 @@ def describe_capital_to_top_n(capital: float) -> str:
 
 
 if __name__ == "__main__":
-    # 自检：常见档位
-    print("资金 -> 持仓数 映射表（考虑最低 5 元佣金陷阱）")
-    print("-" * 60)
+    print("资金 -> 持仓数（区间 + 推荐值）")
+    print("=" * 70)
+    print(f"{'资金':<12} {'区间':<12} {'推荐':<6} {'单股仓位':<14}")
+    print("-" * 70)
     for c in [20000, 40000, 80000, 200000, 500000, 1500000, 5000000, 20000000, 50000000]:
-        line = describe_capital_to_top_n(c)
-        warn = warn_if_capital_too_small(c)
-        print(line, "  " + warn if warn else "")
+        mn, mx = position_range(c)
+        rec = calc_optimal_top_n(c)
+        per_pos = c / rec
+        print(f"{c:>10,}元  [{mn},{mx}]      {rec:<6}  {per_pos:>10,.0f} 元/只")
