@@ -310,14 +310,32 @@ class DataFetcher:
     def get_stock_indicator(self, ts_code) -> pd.DataFrame:
         """单股估值指标（PE/PB/市值，东财源）
 
+        优先级: DB -> CSV cache -> API；新拉数据自动写回 DB
+
         Returns:
             DataFrame: 含 PE/PB/总市值 列；失败时返回空 DataFrame
         """
+        # ---- 优先级 1: DB ----
+        try:
+            from data.db import get_conn
+            with get_conn() as conn:
+                df = pd.read_sql(
+                    "SELECT trade_date, pe, pe_ttm, pb, ps, total_mv, circ_mv "
+                    "FROM market_valuation WHERE ts_code=%s ORDER BY trade_date ASC",
+                    conn, params=(ts_code,))
+                if not df.empty:
+                    df["ts_code"] = ts_code
+                    return df
+        except Exception:
+            pass
+
+        # ---- 优先级 2: CSV cache ----
         cache_name = f"indicator_{ts_code}"
         cached = self._load_cache(cache_name)
         if cached is not None:
             return cached
 
+        # ---- 优先级 3: API ----
         symbol = ts_code_to_symbol(ts_code)
         try:
             df = ak.stock_value_em(symbol=symbol)
@@ -347,6 +365,22 @@ class DataFetcher:
             if c in df.columns:
                 df[c] = pd.to_numeric(df[c], errors="coerce")
         self._save_cache(cache_name, df)
+
+        # 写回 DB（不影响返回，失败 silent）
+        try:
+            from data.db import get_conn, upsert_valuation
+            df_db = df.copy()
+            df_db["ts_code"] = ts_code
+            if "trade_date" in df_db.columns:
+                df_db["trade_date"] = pd.to_datetime(
+                    df_db["trade_date"].astype(str), errors="coerce"
+                ).dt.strftime("%Y-%m-%d")
+                df_db = df_db.dropna(subset=["trade_date"])
+                with get_conn() as conn:
+                    upsert_valuation(conn, df_db)
+        except Exception:
+            pass
+
         return df
 
     # ------------------------------------------------------------------
