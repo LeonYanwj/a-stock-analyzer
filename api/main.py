@@ -10,7 +10,7 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from api.routes import accounts, screen, rate, backtest, stocks
+from api.routes import accounts, screen, rate, backtest, stocks, tasks
 
 
 app = FastAPI(
@@ -35,6 +35,7 @@ app.include_router(screen.router)
 app.include_router(rate.router)
 app.include_router(backtest.router)
 app.include_router(stocks.router)
+app.include_router(tasks.router)
 
 
 @app.get("/")
@@ -45,10 +46,11 @@ def root():
         "docs": "/docs",
         "endpoints": {
             "accounts":  "/api/accounts",
-            "screen":    "/api/screen",
+            "screen":    "/api/screen (同步) 或 POST /api/screen/async (异步)",
             "rate":      "/api/rate/{code}",
             "backtest":  "/api/backtest",
             "stocks":    "/api/stocks",
+            "tasks":     "/api/tasks (异步任务查询)",
         }
     }
 
