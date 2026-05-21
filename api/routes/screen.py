@@ -88,8 +88,10 @@ def run_screen_async(
     if strategy not in list_strategies():
         raise BadRequest(f"未知策略：{strategy}", code="UNKNOWN_STRATEGY",
                          detail=f"可选：{list_strategies()}")
+    params = {"strategy": strategy, "capital": capital, "top": top,
+              "limit": limit, "lookback": lookback, "enable_news": enable_news}
     task = task_mgr.submit(
-        "screen", _do_screen,
+        "screen", _do_screen, params=params,
         strategy=strategy, capital=capital, top=top,
         limit=limit, lookback=lookback, enable_news=enable_news,
     )

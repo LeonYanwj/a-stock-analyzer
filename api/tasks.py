@@ -1,28 +1,34 @@
-"""简单内存任务队列（基于 threading）
+"""简单内存任务队列（基于 threading）+ DB 归档
 
-适合个人系统使用：
-- 任务存内存（重启丢失）
-- 任意 Python 函数能丢进来后台跑
-- 前端轮询 GET /api/tasks/{task_id} 查状态
+设计：
+- 进行中的任务在内存（pending/running/done/failed），轮询低延迟
+- done / failed 任务自动写进 api_task_history 表（重启不丢）
+- GET /api/tasks/{id} 内存里没找到时降级到 DB 查
+- GET /api/tasks/history 直接查 DB
 
 不适合：
-- 多进程部署（每个进程独立任务表）
-- 任务需要持久化（重启不丢）
+- 多进程部署（每个进程内存任务表独立）
 - 高并发（无锁竞争控制）
 
 需要这些时升级 celery / arq + Redis。
 """
+import json
 import uuid
+import logging
 import threading
 import traceback
 from datetime import datetime
 from typing import Callable, Dict, Any, Optional
 
 
+logger = logging.getLogger("api.tasks")
+
+
 class Task:
     """单个后台任务"""
 
-    def __init__(self, name: str, fn: Callable, args: tuple = (), kwargs: dict = None):
+    def __init__(self, name: str, fn: Callable, args: tuple = (), kwargs: dict = None,
+                 params: dict = None):
         self.task_id: str = str(uuid.uuid4())
         self.name: str = name
         self.status: str = "pending"           # pending / running / done / failed
@@ -34,6 +40,7 @@ class Task:
         self.created_at: datetime = datetime.now()
         self.started_at: Optional[datetime] = None
         self.finished_at: Optional[datetime] = None
+        self.params: dict = params or {}        # 入参快照（用于 DB 归档 + 复盘）
         self._fn = fn
         self._args = args
         self._kwargs = kwargs or {}
@@ -73,6 +80,37 @@ class Task:
             self.progress_msg = "failed"
         finally:
             self.finished_at = datetime.now()
+            # 完成的任务自动归档进 DB（失败不抛，避免影响主流程）
+            self._archive_to_db()
+
+    def _archive_to_db(self):
+        """把 done/failed 任务写进 api_task_history。DB 出问题不抛。"""
+        try:
+            from data.db import get_conn, insert_api_task
+            with get_conn() as conn:
+                insert_api_task(conn, self.to_dict_db())
+        except Exception as e:
+            logger.warning(
+                "[task %s] DB 归档失败 %s: %s",
+                self.task_id[:8], type(e).__name__, e,
+            )
+
+    def to_dict_db(self) -> dict:
+        """DB 归档用的字典（含 params / traceback）"""
+        return {
+            "task_id": self.task_id,
+            "name": self.name,
+            "status": self.status,
+            "progress_msg": self.progress_msg,
+            "params": self.params,
+            "result": self.result,
+            "error": self.error,
+            "traceback": self.traceback,
+            "created_at": self.created_at.strftime("%Y-%m-%d %H:%M:%S"),
+            "started_at": self.started_at.strftime("%Y-%m-%d %H:%M:%S") if self.started_at else None,
+            "finished_at": self.finished_at.strftime("%Y-%m-%d %H:%M:%S") if self.finished_at else None,
+            "duration_seconds": self.duration_seconds,
+        }
 
     @property
     def duration_seconds(self) -> Optional[float]:
@@ -89,11 +127,13 @@ class Task:
             "status": self.status,
             "progress": self.progress,
             "progress_msg": self.progress_msg,
+            "params": self.params,
             "created_at": self.created_at.isoformat(),
             "started_at": self.started_at.isoformat() if self.started_at else None,
             "finished_at": self.finished_at.isoformat() if self.finished_at else None,
             "duration_seconds": self.duration_seconds,
             "error": self.error,
+            "from_db": False,
         }
         if include_result:
             d["result"] = self.result
@@ -107,9 +147,16 @@ _TASKS: Dict[str, Task] = {}
 _LOCK = threading.Lock()
 
 
-def submit(name: str, fn: Callable, *args, **kwargs) -> Task:
-    """提交一个任务到后台跑，立即返回 Task 对象"""
-    task = Task(name, fn, args, kwargs)
+def submit(name: str, fn: Callable, *args, params: dict = None, **kwargs) -> Task:
+    """提交一个任务到后台跑，立即返回 Task 对象
+
+    Args:
+        name: 任务类别名 (screen / auto_rebalance / daily_run / backtest)
+        fn:   实际执行的函数（可选地接受 task 作为首参以报告进度）
+        *args, **kwargs: 透传给 fn 的入参
+        params: 入参快照（DB 归档用，用于历史复盘时知道是什么参数跑的）
+    """
+    task = Task(name, fn, args, kwargs, params=params)
     with _LOCK:
         _TASKS[task.task_id] = task
     task.start()
@@ -117,8 +164,48 @@ def submit(name: str, fn: Callable, *args, **kwargs) -> Task:
 
 
 def get(task_id: str) -> Optional[Task]:
+    """从内存任务表里查 task；返回 None 表示内存里没有（可能在 DB 归档里）"""
     with _LOCK:
         return _TASKS.get(task_id)
+
+
+def get_or_db(task_id: str, include_traceback: bool = False) -> Optional[dict]:
+    """先查内存；内存没有就降级到 DB 归档查。返回 dict 或 None"""
+    t = get(task_id)
+    if t is not None:
+        return t.to_dict(include_result=True, include_traceback=include_traceback)
+    # 内存没找到，查 DB
+    try:
+        from data.db import get_conn, get_api_task
+        with get_conn() as conn:
+            return get_api_task(conn, task_id)
+    except Exception as e:
+        logger.warning("[task %s] DB fallback 查询失败: %s", task_id[:8], e)
+        return None
+
+
+def list_history(name: str = None, status: str = None, limit: int = 30) -> list:
+    """查归档任务列表（DB），用于 GET /api/tasks/history"""
+    try:
+        from data.db import get_conn, list_api_tasks
+        with get_conn() as conn:
+            df = list_api_tasks(conn, name=name, status=status, limit=limit)
+        if df.empty:
+            return []
+        # 把 datetime / decimal 转 JSON 友好
+        rows = []
+        for _, r in df.iterrows():
+            d = r.to_dict()
+            for k in ("created_at", "started_at", "finished_at"):
+                if d.get(k) is not None and hasattr(d[k], "isoformat"):
+                    d[k] = d[k].isoformat()
+            if d.get("duration_seconds") is not None:
+                d["duration_seconds"] = float(d["duration_seconds"])
+            rows.append(d)
+        return rows
+    except Exception as e:
+        logger.warning("[history] DB 查询失败: %s", e)
+        return []
 
 
 def list_tasks(limit: int = 50, name_filter: str = None,

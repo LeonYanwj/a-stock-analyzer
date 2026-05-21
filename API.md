@@ -87,13 +87,25 @@ curl -X POST "http://localhost:8000/api/accounts?name=test-A&capital=50000&strat
 ```
 
 ### `GET /api/accounts/{id}/positions`
-**账户持仓**（含当日价 + 收益率）
+**账户持仓**（含价 + 收益率 + 价格来源标记）
 
 参数：
 - `asof`（可选）：查某日的持仓估值，默认今天
+- `use_realtime`（默认 `true`）：不传 `asof` 时优先拉 AKShare spot 拿实时价
+
+价格选择顺序：
+1. **实时价**（盘中分时价 / 盘后当日收盘）→ `price_source: "realtime"`
+2. spot 拉失败时降级 DB 收盘价 → `price_source: "close"`
+3. 都没有时用持仓成本 → `price_source: "cost"`
 
 ```bash
+# 默认实时价
 curl http://localhost:8000/api/accounts/1/positions
+
+# 强制用 DB 历史价（更快，离线场景）
+curl "http://localhost:8000/api/accounts/1/positions?use_realtime=false"
+
+# 历史某日估值
 curl "http://localhost:8000/api/accounts/1/positions?asof=2026-05-13"
 ```
 
@@ -104,10 +116,11 @@ curl "http://localhost:8000/api/accounts/1/positions?asof=2026-05-13"
     "ts_code": "600094.SH",
     "qty": 2600,
     "avg_cost": 4.725,
-    "current_price": 4.88,
-    "return_pct": 0.0328,
-    "market_value": 12688.0,
-    "open_date": "2026-05-13"
+    "current_price": 4.54,
+    "return_pct": -0.0392,
+    "market_value": 11804.0,
+    "open_date": "2026-05-13",
+    "price_source": "realtime"
   }
 ]
 ```
@@ -338,26 +351,37 @@ curl "http://localhost:8000/api/stocks/002028.SZ/daily?start_date=2024-01-01&end
 ## ⏱️ 任务管理接口（异步任务专用）
 
 ### `GET /api/tasks?limit=30&name=screen&status=running`
-**列出最近任务**
+**列出内存里的最近任务**（看进行中和刚跑完的）
 
 参数：
 - `limit`: 返回数量
-- `name`: 任务名过滤（如 `screen`）
+- `name`: 任务名过滤（如 `screen` / `auto_rebalance` / `daily_run` / `backtest`）
 - `status`: pending / running / done / failed
 
 ### `GET /api/tasks/{task_id}?include_result=true&include_traceback=false`
-**查单个任务**
+**查单个任务**（先查内存，没有就降级到 DB 归档）
 
 返回字段：
 - `status`: pending / running / done / failed
 - `progress`: 0-100
 - `progress_msg`: 当前阶段描述
+- `params`: 提交时的入参快照（DB 归档里能看到当时怎么跑的）
 - `duration_seconds`: 已运行秒数
 - `result`: 任务返回值（status=done 时）
 - `error`: 错误信息（status=failed 时）
+- **`from_db`**: `false` 在内存里 / `true` 已归档到 DB（API 重启后仍可查）
+
+### `GET /api/tasks/history?name=&status=&limit=30` ⭐ 新
+**从 DB 归档表查历史任务**（重启不丢，跨 API 进程可见）
+
+只有 `done` / `failed` 的任务会归档；运行中的任务仍只在内存。每条记录返回基础字段，要详细 `result/params` 需要 `GET /api/tasks/{task_id}`。
+
+```bash
+curl "http://localhost:8000/api/tasks/history?name=backtest&status=done&limit=20"
+```
 
 ### `DELETE /api/tasks/cleanup?keep=100`
-**清理旧任务**
+**清理内存任务表**（DB 归档不动）
 
 ---
 
@@ -394,10 +418,11 @@ async function runScreenAsync() {
 
 ## ⚠️ 已知限制
 
-1. **任务表存内存**：重启 API 服务任务会丢，结果需要查 DB 持久化数据
+1. **进行中的任务在内存**：API 重启后正在跑的任务会丢失。已完成（done/failed）的任务已归档到 `api_task_history`，可通过 `GET /api/tasks/{id}` 或 `GET /api/tasks/history` 查到。
 2. **无身份认证**：仅供个人/内网使用，**勿暴露公网**
 3. **任务进度不细致**：当前只在几个关键点更新（10% / 95%），不是逐股进度
 4. **CORS 全开放**：生产环境前请收紧 `allow_origins`
+5. **实时价依赖外网**：盘中拉 AKShare spot 偶尔会超时；接口已自动降级到 DB 收盘价（`price_source` 字段会反映来源）
 
 ---
 

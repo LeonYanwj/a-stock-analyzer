@@ -25,6 +25,7 @@ class PositionRow(BaseModel):
     return_pct: Optional[float] = None
     market_value: Optional[float] = None
     open_date: date
+    price_source: Optional[str] = None       # realtime / close / cost
 
 
 class TradeRow(BaseModel):

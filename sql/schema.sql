@@ -270,6 +270,24 @@ CREATE TABLE IF NOT EXISTS paper_equity_daily (
     FOREIGN KEY (account_id) REFERENCES paper_account(account_id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT '模拟盘每日权益快照';
 
+-- 18. API 异步任务历史（done/failed 任务持久化，重启不丢）
+CREATE TABLE IF NOT EXISTS api_task_history (
+    task_id          VARCHAR(40) PRIMARY KEY        COMMENT 'UUID',
+    name             VARCHAR(40) NOT NULL           COMMENT 'screen/auto_rebalance/daily_run/backtest',
+    status           VARCHAR(20) NOT NULL           COMMENT 'done/failed',
+    progress_msg     VARCHAR(200),
+    params           JSON                           COMMENT '入参',
+    result           JSON                           COMMENT '任务返回值',
+    error            TEXT                           COMMENT '错误消息',
+    traceback        TEXT                           COMMENT 'Python traceback',
+    created_at       DATETIME    NOT NULL,
+    started_at       DATETIME,
+    finished_at      DATETIME,
+    duration_seconds DECIMAL(10,2),
+    INDEX idx_name_status (name, status),
+    INDEX idx_created (created_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT 'API 异步任务历史归档';
+
 -- ===== 初始数据 =========================================================
 
 -- 把现有 3 个策略灌进去（用 INSERT IGNORE 避免重复）

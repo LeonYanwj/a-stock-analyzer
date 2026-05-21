@@ -42,25 +42,71 @@ def get_account(account_id: int):
             for k, v in acc.items()}
 
 
+def _get_realtime_prices(ts_codes: list) -> dict:
+    """拉一次全市场 spot，取出指定 ts_code 的最新价。失败返回空 dict。
+
+    cached in DataFetcher（进程级），多个账户连续查 positions 不会重复拉。
+    """
+    try:
+        from data.fetcher import DataFetcher
+        spot = DataFetcher().get_market_snapshot()
+        if spot.empty:
+            return {}
+        sub = spot[spot["ts_code"].isin(ts_codes)][["ts_code", "close"]]
+        return {row["ts_code"]: float(row["close"]) for _, row in sub.iterrows()
+                if row.get("close") is not None}
+    except Exception:
+        return {}
+
+
 @router.get("/{account_id}/positions", response_model=List[PositionRow])
-def get_positions(account_id: int, asof: Optional[date] = None):
-    """账户当前持仓（含当日收盘价/收益率）"""
+def get_positions(account_id: int, asof: Optional[date] = None,
+                  use_realtime: bool = True):
+    """账户当前持仓（含价格/收益率）
+
+    价格优先级：
+      - 不传 asof + use_realtime=true → 拉 spot 拿实时价（盘中是分时价，盘后是当日收盘）
+      - 传 asof 或者 use_realtime=false → 用 DB 收盘价（历史日期或离线场景）
+      - 实时价拉失败 → 自动回退 DB 收盘价
+      - 都没有 → 用持仓成本（避免 None）
+
+    返回字段 `price_source`：realtime / close / cost
+    """
     df = eng.get_positions(account_id)
     if df.empty:
         return []
+
     use_date = asof or date.today()
+    # 默认场景：不传 asof（看现在）+ use_realtime → 试拉 spot
+    want_realtime = use_realtime and asof is None
+    realtime_prices = _get_realtime_prices(df["ts_code"].tolist()) if want_realtime else {}
+
     rows = []
     for _, p in df.iterrows():
-        price = eng.get_close_price(p["ts_code"], use_date) or float(p["avg_cost"])
-        ret = price / float(p["avg_cost"]) - 1 if float(p["avg_cost"]) > 0 else 0
+        avg_cost = float(p["avg_cost"])
+        ts_code = p["ts_code"]
+        # 价格选择
+        if ts_code in realtime_prices:
+            price = realtime_prices[ts_code]
+            source = "realtime"
+        else:
+            close = eng.get_close_price(ts_code, use_date)
+            if close is not None:
+                price = float(close)
+                source = "close"
+            else:
+                price = avg_cost
+                source = "cost"
+        ret = price / avg_cost - 1 if avg_cost > 0 else 0
         rows.append({
-            "ts_code": p["ts_code"],
+            "ts_code": ts_code,
             "qty": int(p["qty"]),
-            "avg_cost": float(p["avg_cost"]),
+            "avg_cost": avg_cost,
             "current_price": price,
             "return_pct": ret,
             "market_value": float(p["qty"]) * price,
             "open_date": p["open_date"],
+            "price_source": source,
         })
     return rows
 
@@ -175,8 +221,10 @@ def auto_rebalance_async(
     if acc is None:
         raise NotFound(f"账户 {account_id} 不存在", code="ACCOUNT_NOT_FOUND")
 
+    params = {"account_id": account_id, "limit": limit,
+              "asof": str(asof) if asof else None, "enable_news": enable_news}
     task = task_mgr.submit(
-        "auto_rebalance", _do_auto_rebalance,
+        "auto_rebalance", _do_auto_rebalance, params=params,
         account_id=account_id, limit=limit, asof=asof, enable_news=enable_news,
     )
     return {"task_id": task.task_id, "status": task.status,
@@ -232,8 +280,10 @@ def daily_run_async(
     if acc is None:
         raise NotFound(f"账户 {account_id} 不存在", code="ACCOUNT_NOT_FOUND")
 
+    params = {"account_id": account_id, "asof": str(asof) if asof else None,
+              "limit": limit, "dry_run": dry_run}
     task = task_mgr.submit(
-        "daily_run", _do_daily_run,
+        "daily_run", _do_daily_run, params=params,
         account_id=account_id, asof=asof, limit=limit, dry_run=dry_run,
     )
     return {"task_id": task.task_id, "status": task.status,

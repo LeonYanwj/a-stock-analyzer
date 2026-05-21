@@ -159,8 +159,10 @@ def run_backtest_async(
     if limit < 10:
         raise BadRequest("limit 不小于 10", code="INVALID_LIMIT")
 
+    params = {"strategy": strategy, "months": months, "limit": limit,
+              "top": top, "capital": capital, "rebal_weeks": rebal_weeks}
     task = task_mgr.submit(
-        "backtest", _do_run_backtest,
+        "backtest", _do_run_backtest, params=params,
         strategy=strategy, months=months, limit=limit,
         top=top, capital=capital, rebal_weeks=rebal_weeks,
     )

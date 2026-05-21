@@ -280,6 +280,94 @@ def get_backtest_detail(conn, run_id: int) -> dict:
 
 
 # ----------------------------------------------------------------------
+# api_task_history：API 异步任务归档
+# ----------------------------------------------------------------------
+def insert_api_task(conn, task_dict: dict) -> None:
+    """把一个完成的任务写进 api_task_history（done/failed 都存）
+
+    task_dict 是 Task.to_dict_db() 的输出。result/params/error 都已序列化为字符串。
+    """
+    import json
+    sql = ("INSERT IGNORE INTO api_task_history "
+           "(task_id, name, status, progress_msg, params, result, error, "
+           " traceback, created_at, started_at, finished_at, duration_seconds) "
+           "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)")
+
+    def _ser(v):
+        if v is None:
+            return None
+        if isinstance(v, str):
+            return v
+        try:
+            return json.dumps(v, ensure_ascii=False, default=str)
+        except Exception:
+            return str(v)
+
+    cur = conn.cursor()
+    cur.execute(sql, (
+        task_dict["task_id"],
+        task_dict["name"],
+        task_dict["status"],
+        task_dict.get("progress_msg"),
+        _ser(task_dict.get("params")),
+        _ser(task_dict.get("result")),
+        task_dict.get("error"),
+        task_dict.get("traceback"),
+        task_dict.get("created_at"),
+        task_dict.get("started_at"),
+        task_dict.get("finished_at"),
+        task_dict.get("duration_seconds"),
+    ))
+    cur.close()
+
+
+def list_api_tasks(conn, name: str = None, status: str = None,
+                   limit: int = 30) -> pd.DataFrame:
+    """列出归档任务（不含 result/params/traceback 大字段，只看清单）"""
+    sql = ("SELECT task_id, name, status, progress_msg, error, "
+           "created_at, started_at, finished_at, duration_seconds "
+           "FROM api_task_history WHERE 1=1")
+    params = []
+    if name:
+        sql += " AND name=%s"
+        params.append(name)
+    if status:
+        sql += " AND status=%s"
+        params.append(status)
+    sql += " ORDER BY created_at DESC LIMIT %s"
+    params.append(limit)
+    return pd.read_sql(sql, conn, params=tuple(params))
+
+
+def get_api_task(conn, task_id: str) -> dict:
+    """查单条归档任务（含 result / params / traceback）"""
+    import json
+    sql = "SELECT * FROM api_task_history WHERE task_id=%s"
+    df = pd.read_sql(sql, conn, params=(task_id,))
+    if df.empty:
+        return None
+    row = df.iloc[0].to_dict()
+    # JSON 字段反序列化
+    for k in ("params", "result"):
+        v = row.get(k)
+        if v and isinstance(v, str):
+            try:
+                row[k] = json.loads(v)
+            except Exception:
+                pass
+    # datetime → ISO
+    for k in ("created_at", "started_at", "finished_at"):
+        if row.get(k) is not None and hasattr(row[k], "isoformat"):
+            row[k] = row[k].isoformat()
+    if row.get("duration_seconds") is not None:
+        row["duration_seconds"] = float(row["duration_seconds"])
+    # progress / 内存字段补全（DB 里没存的）
+    row["progress"] = 100 if row["status"] == "done" else 0
+    row["from_db"] = True
+    return row
+
+
+# ----------------------------------------------------------------------
 # 工具
 # ----------------------------------------------------------------------
 def _norm_date(d) -> str:
