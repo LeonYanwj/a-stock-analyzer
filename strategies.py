@@ -31,6 +31,8 @@ FACTOR_PROFILES = {
         "macd_slope":    0.8,
         "lxsz":          1.0,
         "pattern_score": 0.8,   # 形态对短线最有用
+        "roe":           0.2,   # 短线不太看基本面
+        "gross_margin":  0.1,
     },
     "swing": {
         "ep_ttm":        0.5,
@@ -46,6 +48,8 @@ FACTOR_PROFILES = {
         "macd_slope":    0.4,
         "lxsz":          0.5,
         "pattern_score": 0.5,
+        "roe":           0.8,   # 波段平衡看基本面
+        "gross_margin":  0.5,
     },
     "trend": {
         "ep_ttm":        0.2,
@@ -61,6 +65,8 @@ FACTOR_PROFILES = {
         "macd_slope":    0.6,
         "lxsz":          0.8,
         "pattern_score": 0.3,   # 趋势策略不太依赖反转形态
+        "roe":           1.0,   # 趋势 + 基本面 = 长牛股特征
+        "gross_margin":  0.6,
     },
     # 基于 2022-2024 多窗口 IC 分析的稳健调权重版本
     # walk-forward 验证：500 只主板下 3 窗口胜率 67%，

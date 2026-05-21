@@ -91,10 +91,13 @@ def screen_market(strategy: str = "swing", capital: float = 0,
     if verbose:
         print(f"  股票池: {len(universe)} 只")
 
-    # 2. spot + 资金流 + 量价齐升
+    # 2. spot + 资金流 + 量价齐升 + 财务（基本面）
     spot = fetcher.get_market_snapshot()
     fund_flow = fetcher.get_fund_flow_snapshot(window="5日排行")
     lxsz_df = fetcher.get_stock_rank_lxsz()
+    fin_df = fetcher.get_financial_latest_all()
+    if verbose and not fin_df.empty:
+        print(f"  financial: {len(fin_df)} 只覆盖")
 
     # 3. 历史日线
     if verbose:
@@ -109,6 +112,12 @@ def screen_market(strategy: str = "swing", capital: float = 0,
         panel = panel.merge(fund_flow[flow_cols], on="ts_code", how="left")
     if not lxsz_df.empty and "lxsz_days" in lxsz_df.columns:
         panel = panel.merge(lxsz_df[["ts_code", "lxsz_days"]], on="ts_code", how="left")
+    # merge 基本面（roe / gross_margin 等）
+    if not fin_df.empty:
+        fin_cols = [c for c in ["ts_code", "roe", "gross_margin", "net_margin",
+                                "debt_ratio", "net_profit_yoy", "revenue_yoy"]
+                    if c in fin_df.columns]
+        panel = panel.merge(fin_df[fin_cols], on="ts_code", how="left")
 
     # 4. 因子 + 打分
     factors = compute_all_factors(panel, asof_date=asof)
@@ -205,6 +214,9 @@ def main():
     fund_flow = fetcher.get_fund_flow_snapshot(window="5日排行")
     print(f"  fund_flow: {len(fund_flow)} 只" if not fund_flow.empty else "  fund_flow: 不可用（资金流因子会跳过）")
     lxsz_df = fetcher.get_stock_rank_lxsz()
+    fin_df = fetcher.get_financial_latest_all()
+    if not fin_df.empty:
+        print(f"  financial: {len(fin_df)} 只覆盖")
 
     # 3. 历史日线（用于动量/反转/波动率因子）
     print(f"\n[3/4] 拉取 {len(universe)} 只股票近 {args.lookback}+ 天日线...")
@@ -224,6 +236,12 @@ def main():
     # 把量价齐升 lxsz_days merge 进 panel（榜外股票自动是 NaN，后续 fillna(0)）
     if not lxsz_df.empty and "lxsz_days" in lxsz_df.columns:
         panel = panel.merge(lxsz_df[["ts_code", "lxsz_days"]], on="ts_code", how="left")
+    # 把基本面（roe/gross_margin 等）merge 进 panel
+    if not fin_df.empty:
+        fin_cols = [c for c in ["ts_code", "roe", "gross_margin", "net_margin",
+                                "debt_ratio", "net_profit_yoy", "revenue_yoy"]
+                    if c in fin_df.columns]
+        panel = panel.merge(fin_df[fin_cols], on="ts_code", how="left")
 
     # 4. 因子 + 打分（按策略选权重）
     print(f"\n[4/4] 计算因子 + 打分排序... (strategy={args.strategy})")

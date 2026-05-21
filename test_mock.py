@@ -104,6 +104,9 @@ def make_mock_panel(ts_codes, n_days=N_DAYS):
     # 量价齐升：5% 的股票上榜（连涨 3-10 天），其余为 NaN（fillna 0）
     lxsz_mask = np.random.random(n) < 0.05
     lxsz_days = np.where(lxsz_mask, np.random.randint(3, 11, n), np.nan)
+    # 基本面（ROE 8-20%, gross_margin 15-50% 模拟）
+    roe = np.random.uniform(5, 25, n)
+    gross_margin = np.random.uniform(15, 60, n)
 
     # 注入若干异常值检验防御
     pe_ttm[np.random.choice(n, max(1, n // 20), replace=False)] = np.nan
@@ -119,6 +122,8 @@ def make_mock_panel(ts_codes, n_days=N_DAYS):
         "fund_outflow": fund_outflow,
         "fund_net": fund_net,
         "lxsz_days": lxsz_days,
+        "roe": roe,
+        "gross_margin": gross_margin,
     })
     return panel.merge(snap, on="ts_code", how="left")
 

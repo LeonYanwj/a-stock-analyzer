@@ -27,6 +27,8 @@ FACTOR_WEIGHTS = {
     "macd_slope":    0.4,   # MACD 柱状值近 5 日变化（避开"快死叉"）
     "lxsz":          0.5,   # 量价齐升连涨天数（同花顺榜单，未上榜=0）
     "pattern_score": 0.5,   # 日K形态分（锤子/吞没/黄昏之星等，含量能+位置过滤）
+    "roe":           0.7,   # 净资产收益率 %（已年化，越高越好）
+    "gross_margin":  0.5,   # 销售毛利率 %（越高越好）
 }
 
 
@@ -136,6 +138,17 @@ def compute_all_factors(panel: pd.DataFrame, asof_date: pd.Timestamp) -> pd.Data
     else:
         lxsz = pd.Series(dtype=float)
 
+    # 基本面因子（来自 market_financial 表，已年化）
+    if "roe" in snap.columns:
+        roe = pd.to_numeric(snap["roe"], errors="coerce")
+    else:
+        roe = pd.Series(dtype=float)
+
+    if "gross_margin" in snap.columns:
+        gross_margin = pd.to_numeric(snap["gross_margin"], errors="coerce")
+    else:
+        gross_margin = pd.Series(dtype=float)
+
     # 日 K 形态分（对每只股票算 pattern_score）
     pattern_score = panel.groupby("ts_code", sort=False).apply(
         lambda g: compute_pattern_score(g, lookback=5)
@@ -155,6 +168,8 @@ def compute_all_factors(panel: pd.DataFrame, asof_date: pd.Timestamp) -> pd.Data
         "macd_slope":    macd_slope,
         "lxsz":          lxsz,
         "pattern_score": pattern_score,
+        "roe":           roe,
+        "gross_margin":  gross_margin,
     })
     factors.index.name = "ts_code"
     return factors

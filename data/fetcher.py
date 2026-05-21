@@ -177,6 +177,45 @@ class DataFetcher:
         return df
 
     # ------------------------------------------------------------------
+    # 全市场最新财务（从 market_financial 表一次性查全部最新一期）
+    # ------------------------------------------------------------------
+    def get_financial_latest_all(self) -> pd.DataFrame:
+        """从 market_financial 取每只股票最近一期的财务数据。
+
+        ROE 已做季度年化（Q1×4 / Q2×2 / Q3×4/3 / 年报×1）。
+
+        Returns:
+            DataFrame: ts_code, report_date, roe (年化), gross_margin, ...
+            如果 DB 不可用，返回空 DataFrame
+        """
+        try:
+            from data.db import get_conn
+            with get_conn() as conn:
+                df = pd.read_sql(
+                    "SELECT f.ts_code, f.report_date, f.roe, f.gross_margin, "
+                    "f.net_margin, f.net_profit_yoy, f.revenue_yoy, f.debt_ratio "
+                    "FROM market_financial f "
+                    "INNER JOIN ("
+                    "  SELECT ts_code, MAX(report_date) AS max_date "
+                    "  FROM market_financial GROUP BY ts_code"
+                    ") latest ON f.ts_code=latest.ts_code AND f.report_date=latest.max_date",
+                    conn)
+        except Exception as e:
+            print(f"  [warn] financial 查询失败: {type(e).__name__}: {str(e)[:80]}")
+            return pd.DataFrame()
+        if df.empty:
+            return df
+
+        # ROE 季度年化（pandas datetime 操作）
+        df["report_date"] = pd.to_datetime(df["report_date"])
+        def _annualize(row):
+            month = row["report_date"].month
+            mult = {3: 4.0, 6: 2.0, 9: 4.0 / 3, 12: 1.0}.get(month, 1.0)
+            return row["roe"] * mult if pd.notna(row["roe"]) else None
+        df["roe"] = df.apply(_annualize, axis=1)
+        return df
+
+    # ------------------------------------------------------------------
     # 同花顺财务摘要 + 量价齐升排行
     # ------------------------------------------------------------------
     def get_stock_financial_abstract(self, ts_code) -> pd.DataFrame:
