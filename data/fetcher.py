@@ -182,9 +182,36 @@ class DataFetcher:
     def get_stock_financial_abstract(self, ts_code) -> pd.DataFrame:
         """单股财务摘要（同花顺，含 ROE/毛利率/净利率历史）
 
+        优先级: DB -> CSV cache -> API；新拉数据自动写回 DB
+
         解析中文单位（"%/万/亿"）成 float。
         百分比字段保留为"百分比数值"（如 23.85 表示 23.85%）。
         """
+        # ---- 优先级 1: DB ----
+        try:
+            from data.db import get_conn
+            with get_conn() as conn:
+                df = pd.read_sql(
+                    "SELECT * FROM market_financial WHERE ts_code=%s "
+                    "ORDER BY report_date", conn, params=(ts_code,))
+                if not df.empty:
+                    # 字段映射回中文以兼容老代码
+                    rename_back = {
+                        "report_date": "报告期",
+                        "roe": "净资产收益率",
+                        "gross_margin": "销售毛利率",
+                        "net_margin": "销售净利率",
+                        "net_profit": "净利润",
+                        "net_profit_yoy": "净利润同比增长率",
+                        "revenue": "营业总收入",
+                        "revenue_yoy": "营业总收入同比增长率",
+                        "debt_ratio": "资产负债率",
+                    }
+                    df = df.rename(columns=rename_back)
+                    return df
+        except Exception:
+            pass
+
         cache_name = f"finabs_{ts_code}"
         cached = self._load_cache(cache_name)
         if cached is not None:
@@ -222,6 +249,38 @@ class DataFetcher:
             df["报告期"] = pd.to_datetime(df["报告期"], errors="coerce")
             df = df.sort_values("报告期").reset_index(drop=True)
         self._save_cache(cache_name, df)
+
+        # 写回 DB（不影响返回，silent）
+        try:
+            from data.db import get_conn, upsert_df
+            db_df = df.copy()
+            db_df["ts_code"] = ts_code
+            rename_map = {
+                "报告期": "report_date",
+                "净资产收益率": "roe",
+                "净资产收益率-摊薄": "roe_diluted",
+                "销售毛利率": "gross_margin",
+                "销售净利率": "net_margin",
+                "净利润": "net_profit",
+                "净利润同比增长率": "net_profit_yoy",
+                "营业总收入": "revenue",
+                "营业总收入同比增长率": "revenue_yoy",
+                "资产负债率": "debt_ratio",
+            }
+            db_df = db_df.rename(columns=rename_map)
+            if "report_date" in db_df.columns:
+                db_df["report_date"] = pd.to_datetime(
+                    db_df["report_date"], errors="coerce").dt.strftime("%Y-%m-%d")
+                db_df = db_df.dropna(subset=["report_date"])
+            keep = ["ts_code", "report_date", "roe", "roe_diluted", "gross_margin",
+                    "net_margin", "net_profit", "net_profit_yoy", "revenue",
+                    "revenue_yoy", "debt_ratio"]
+            db_df = db_df[[c for c in keep if c in db_df.columns]]
+            with get_conn() as conn:
+                upsert_df(conn, "market_financial", db_df)
+        except Exception:
+            pass
+
         return df
 
     def get_stock_rank_lxsz(self, use_cache: bool = True) -> pd.DataFrame:
