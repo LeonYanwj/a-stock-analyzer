@@ -5,3 +5,5 @@ numpy
 matplotlib
 mplfinance
 pymysql
+fastapi
+uvicorn[standard]

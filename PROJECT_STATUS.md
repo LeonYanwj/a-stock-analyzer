@@ -43,11 +43,13 @@ Tier 4: 实盘 / ML     → 接券商 API、机器学习增强
 | 2 | 数据基础设施 | ██████████ 100% |
 | 3 | 模拟盘 | █████████░ 95% |
 | 4 | 实盘 / ML / 高级 | ░░░░░░░░░░ 0% |
-| | **整体** | **████████░░ 85%** |
+| 5 | **REST API（前后端分离）** | **██████████ 100%** |
+| | **整体** | **█████████░ 90%** |
 
-**最新动态**：研究平台 100%！ROE/毛利率因子在 screen 全面生效。
-基本面 + 量价 + 资金 + 消息 + 形态 五大维度的因子全部跑通。
-factors/compute.py 共 15 个因子，3 个 strategy profile 已加 roe/gross_margin 权重。
+**最新动态**：FastAPI 后端完成！20+ 接口覆盖账户/选股/评级/回测/股票数据。
+端到端测试全部通过，可直接对接任意前端框架。
+启动: `uvicorn api.main:app --host 0.0.0.0 --port 8000`
+文档: `/docs` (Swagger UI)
 
 ---
 
@@ -143,6 +145,23 @@ python multi_window.py --start-year 2022 --end-year 2024
 python query_backtest.py                       # 列出最近 20 次
 python query_backtest.py --run 5               # 查看第 5 次详情
 python query_backtest.py --compare 3 5 7       # 对比多次
+```
+
+### REST API（前后端分离）
+```bash
+# 启动后端
+python -m uvicorn api.main:app --host 0.0.0.0 --port 8000
+
+# 访问
+http://localhost:8000/docs                       # 交互式 API 文档
+http://localhost:8000/health                     # 健康检查
+http://localhost:8000/api/accounts               # 账户列表
+http://localhost:8000/api/accounts/1/positions   # 持仓
+http://localhost:8000/api/accounts/1/equity      # 净值曲线
+http://localhost:8000/api/screen?strategy=swing&capital=100000   # 跑选股
+http://localhost:8000/api/rate/002028?strategy=swing             # 单股评级
+http://localhost:8000/api/backtest               # 历史回测
+http://localhost:8000/api/stocks?search=平安      # 股票搜索
 ```
 
 ### 模拟盘（Phase 2）
