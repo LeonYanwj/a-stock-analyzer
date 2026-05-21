@@ -105,6 +105,40 @@ def cmd_rebalance(args):
     print(f"  当前总权益: {total:,.2f}")
 
 
+def cmd_auto_rebalance(args):
+    """自动调仓：跑 screen 选股 + 清仓 + 等权买入"""
+    account = eng.get_account(args.account)
+    if account is None:
+        print(f"账户 {args.account} 不存在")
+        return
+
+    print(f"[1/3] 跑 {account['strategy_name']} 选股...")
+    from screen import screen_market
+    picks_df = screen_market(
+        strategy=account["strategy_name"],
+        capital=float(account["current_equity"]),
+        limit=args.limit,
+        verbose=True,
+    )
+    if picks_df.empty:
+        print("  选股结果为空，跳过调仓")
+        return
+    picks = picks_df.index.tolist()
+    print(f"  选出 {len(picks)} 只: {picks[:5]}...")
+
+    print(f"\n[2/3] 清仓 + 买入...")
+    sold = eng.sell_all(args.account, args.date, reason="REBALANCE")
+    print(f"  卖出 {sold['n_sold']} 只, 收入 {sold['total_revenue']:,.2f}")
+    bought = eng.buy_equal_weight(args.account, picks, args.date, reason="REBALANCE")
+    print(f"  买入 {bought['n_bought']} 只, 支出 {bought['total_spent']:,.2f}")
+    if bought["skipped"]:
+        print(f"  跳过 {len(bought['skipped'])} 只")
+
+    print(f"\n[3/3] 保存权益快照...")
+    total = eng.save_equity_snapshot(args.account, args.date)
+    print(f"  当前总权益: {total:,.2f}")
+
+
 def cmd_stoploss(args):
     r = eng.check_stoploss(args.account, args.date)
     if r["triggered"] == 0:
@@ -165,11 +199,17 @@ def main():
     p.add_argument("--reason", default="MANUAL")
     p.set_defaults(func=cmd_sell)
 
-    p = sub.add_parser("rebalance", help="清仓 + 等权买入新选股")
+    p = sub.add_parser("rebalance", help="清仓 + 等权买入新选股（手动传入 picks）")
     p.add_argument("--account", type=int, required=True)
     p.add_argument("--picks", nargs="+", required=True, help="股票代码列表（含交易所，如 600487.SH）")
     p.add_argument("--date", default=None)
     p.set_defaults(func=cmd_rebalance)
+
+    p = sub.add_parser("auto-rebalance", help="自动调仓：跑 screen 选股 + 清仓 + 买入")
+    p.add_argument("--account", type=int, required=True)
+    p.add_argument("--limit", type=int, default=500, help="股票池规模（默认 500）")
+    p.add_argument("--date", default=None)
+    p.set_defaults(func=cmd_auto_rebalance)
 
     p = sub.add_parser("stoploss", help="检查止损")
     p.add_argument("--account", type=int, required=True)

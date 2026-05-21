@@ -57,6 +57,89 @@ def fetch_history_panel(fetcher: DataFetcher, ts_codes, start, end) -> pd.DataFr
     return pd.concat(frames, ignore_index=True)
 
 
+def screen_market(strategy: str = "swing", capital: float = 0,
+                  top_n_arg: int = 0, lookback: int = LOOKBACK_DAYS,
+                  limit: int = 0, enable_news: bool = False,
+                  refine: int = 100, news_weight: float = 0.15,
+                  verbose: bool = True) -> pd.DataFrame:
+    """全市场选股核心函数（可被其他脚本调用，如 paper.py）
+
+    Returns:
+        DataFrame: index=ts_code, 列含 name/score/各因子值
+        空 DataFrame 表示选股失败
+    """
+    # 确定 top_n
+    if top_n_arg > 0:
+        top_actual = top_n_arg
+    elif capital > 0:
+        top_actual = calc_optimal_top_n(capital)
+    else:
+        top_actual = TOP_N
+
+    fetcher = DataFetcher()
+    asof_dt = datetime.now()
+    asof = asof_dt.strftime("%Y%m%d")
+    start = (asof_dt - timedelta(days=lookback + 30)).strftime("%Y%m%d")
+
+    if verbose:
+        print(f"[screen] strategy={strategy}, top={top_actual}, 截面日={asof}")
+
+    # 1. 股票池
+    universe = get_universe(fetcher, exclude_st=True, min_list_days=0)
+    if limit > 0:
+        universe = universe.head(limit)
+    if verbose:
+        print(f"  股票池: {len(universe)} 只")
+
+    # 2. spot + 资金流 + 量价齐升
+    spot = fetcher.get_market_snapshot()
+    fund_flow = fetcher.get_fund_flow_snapshot(window="5日排行")
+    lxsz_df = fetcher.get_stock_rank_lxsz()
+
+    # 3. 历史日线
+    if verbose:
+        print(f"  拉取 {len(universe)} 只股票 {lookback}+ 天日线...")
+    panel = fetch_history_panel(fetcher, universe["ts_code"].tolist(), start, asof)
+
+    spot_cols = [c for c in ["ts_code", "pe_ttm", "pb", "total_mv", "circ_mv"] if c in spot.columns]
+    panel = panel.merge(spot[spot_cols], on="ts_code", how="left")
+    if not fund_flow.empty:
+        flow_cols = [c for c in ["ts_code", "fund_inflow", "fund_outflow", "fund_net"]
+                     if c in fund_flow.columns]
+        panel = panel.merge(fund_flow[flow_cols], on="ts_code", how="left")
+    if not lxsz_df.empty and "lxsz_days" in lxsz_df.columns:
+        panel = panel.merge(lxsz_df[["ts_code", "lxsz_days"]], on="ts_code", how="left")
+
+    # 4. 因子 + 打分
+    factors = compute_all_factors(panel, asof_date=asof)
+    weights = get_factor_weights(strategy)
+    scored = score(factors, weights=weights)
+
+    # 4.5 消息面二次精筛（可选）
+    if enable_news:
+        valid_top = scored.dropna(subset=["score"]).head(refine)
+        if verbose:
+            print(f"  对 Top {len(valid_top)} 拉新闻精筛...")
+        news_scores = {}
+        for tc in valid_top.index:
+            ns = compute_news_score(
+                fetcher.get_stock_news(tc),
+                fetcher.get_stock_disclosure(tc, days=30),
+                fetcher.get_stock_research(tc))
+            if not pd.isna(ns["news_score"]):
+                news_scores[tc] = ns["news_score"]
+        scored["news_score"] = pd.Series(news_scores)
+        scored["news_bonus"] = scored["news_score"].fillna(0) * news_weight
+        scored["final_score"] = scored["score"] + scored["news_bonus"]
+        in_refine = scored.index.isin(valid_top.index)
+        scored.loc[in_refine, "score"] = scored.loc[in_refine, "final_score"]
+        scored = scored.sort_values("score", ascending=False)
+
+    picks = top_n(scored, n=top_actual)
+    name_map = universe.set_index("ts_code")[["name"]]
+    return picks.join(name_map, how="left")
+
+
 def main():
     parser = argparse.ArgumentParser(description="沪深主板多因子选股")
     parser.add_argument("--limit", type=int, default=0, help="限制股票数量（0=不限制）")

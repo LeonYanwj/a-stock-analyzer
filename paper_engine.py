@@ -252,6 +252,33 @@ def buy_equal_weight(account_id: int, picks: list, trade_date,
     return {"n_bought": n, "total_spent": total, "skipped": skipped}
 
 
+# -------------------- 调仓日判断 --------------------
+def is_rebal_day(account_id: int, trade_date) -> bool:
+    """判断今日是否调仓日
+
+    规则: 从最后一次 REBALANCE 交易日算起，超过 rebal_weeks 周即为调仓日。
+    从未调过仓的账户首日就是调仓日。
+    """
+    trade_date = _norm_date(trade_date)
+    account = get_account(account_id)
+    if account is None:
+        return False
+    rebal_weeks = int(account.get("rebal_weeks", 2))
+    with get_conn() as conn:
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT MAX(trade_date) FROM paper_trade "
+            "WHERE account_id=%s AND reason='REBALANCE'",
+            (account_id,))
+        row = cur.fetchone()
+        cur.close()
+    last = row[0] if row else None
+    if last is None:
+        return True
+    last = _norm_date(last)
+    return (trade_date - last).days >= rebal_weeks * 7
+
+
 # -------------------- 止损 --------------------
 def check_stoploss(account_id: int, trade_date) -> dict:
     """检查持仓收益是否触发止损"""
