@@ -39,15 +39,16 @@ Tier 4: 实盘 / ML     → 接券商 API、机器学习增强
 
 | Tier | 模块 | 进度 |
 |------|------|:----:|
-| 1 | 量化研究平台 | █████████░ 85% |
-| 2 | 数据基础设施 | █████████░ 88% |
+| 1 | 量化研究平台 | █████████░ 92% |
+| 2 | 数据基础设施 | █████████░ 95% |
 | 3 | 模拟盘 | █████████░ 95% |
 | 4 | 实盘 / ML / 高级 | ░░░░░░░░░░ 0% |
-| | **整体** | **██████░░░░ 67%** |
+| | **整体** | **███████░░░ 75%** |
 
-**最新动态**：Phase 2 完整闭环！`daily_runner.py` 一行命令跑完所有账户：
-止损 → 调仓判断 → 自动选股 + 调仓 → 权益快照 → 复盘报告。
-准备好接入 cron 每日自动运行。
+**最新动态**：研究平台 + 数据基础双补齐到 90%+。
+新增 trade_calendar 入库 + financial DB 接入 + fund_flow 写回 +
+3 个 backtest 加 --capital + 手续费精确化模型。
+financial 全市场初始化后台运行中（60-90 分钟）。
 
 ---
 
@@ -91,10 +92,10 @@ Tier 4: 实盘 / ML     → 接券商 API、机器学习增强
 | `market_daily` | 827,793 | ✅ 501 只 × 8 年 |
 | `market_stock_basic` | 5,204 | ✅ 全市场 + ST 标记 |
 | `market_valuation` | 3,741,349 | ✅ 2000 只 × PE/PB 历史 |
-| `market_financial` | 0 | ❌ 待接入 |
-| `market_fund_flow` | 0 | ❌ 待积累 |
-| `market_trade_calendar` | 0 | ❌ 待初始化 |
-| `market_universe_snapshot` | 0 | ❌ 待积累 |
+| `market_financial` | ⏳ 初始化中 | 后台跑 2000 只（60-90 分钟）|
+| `market_fund_flow` | ✅ 累积中 | 每次 fetcher 调用自动入库 |
+| `market_trade_calendar` | **8,797** | ✅ 1990-2026 全量 |
+| `market_universe_snapshot` | 0 | ⏸ 暂跳过（需 list_date/ST 历史，限制大）|
 | `strategy_config` | 3 | ✅ short_term / swing / trend |
 | `backtest_run` 等 (4 张) | 累积中 | ✅ **每次 backtest_simple.py 自动写入** |
 | `paper_*` (5 张) | ✅ 累积中 | **Phase 2 MVP 已上线** |
@@ -181,14 +182,15 @@ python init_data.py --limit 2000              # 全市场 stock_basic + 估值
 
 ## 五、路线图
 
-### 短期（完善 Tier 1/2，1-3 天工作量）
-- [ ] 接入财务数据 `market_financial`（ROE/毛利率全市场入库）
-- [x] ~~改造 backtest 写入 `backtest_*` 表~~ ✅ 已完成（含 query_backtest.py）
-- [ ] 把 DB 写入扩展到 backtest_rolling / walk_forward / multi_window
-- [ ] 改造 fetcher.get_fund_flow_snapshot 写入 `market_fund_flow`（每日积累）
-- [ ] 初始化 `market_trade_calendar`（一次性脚本）
-- [ ] 改进手续费模型（精确化最低 5 元佣金 + 印花税分离）
-- [ ] `--capital` 推广到其他 3 个回测脚本
+### 短期（完善 Tier 1/2）✅ **基本完成**
+- [x] ~~接入财务数据 `market_financial`~~ ✅ fetcher DB 优先 + init_financial.py
+- [x] ~~改造 backtest 写入 `backtest_*` 表~~ ✅ backtest_simple
+- [x] ~~改造 fund_flow 写入 `market_fund_flow`~~ ✅ 每次调用自动入库
+- [x] ~~初始化 `market_trade_calendar`~~ ✅ 8797 个交易日
+- [x] ~~改进手续费模型（精确最低 5 元佣金）~~ ✅ calc_realistic_cost_rate
+- [x] ~~`--capital` 推广到 4 个回测脚本~~ ✅
+- [ ] 把 DB 写入扩展到 backtest_rolling / walk_forward / multi_window（研究脚本，可选）
+- [ ] `market_universe_snapshot` 反推（需 list_date 数据，暂缓）
 
 ### 中期（Phase 2 模拟盘） ✅ **基本完成**
 - [x] ~~模拟账户管理~~ ✅ paper_engine.py
