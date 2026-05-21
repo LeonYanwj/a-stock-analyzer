@@ -1,6 +1,7 @@
 """任务管理 API（查询任务状态/进度/结果）"""
 from typing import Optional
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter
+from api.errors import NotFound
 
 from api import tasks as task_mgr
 
@@ -34,7 +35,8 @@ def get_task(task_id: str, include_result: bool = True,
     """
     t = task_mgr.get(task_id)
     if t is None:
-        raise HTTPException(404, f"task_id {task_id} 不存在（重启后任务表会清空）")
+        raise NotFound(f"task_id {task_id} 不存在（API 重启后任务表会清空）",
+                       code="TASK_NOT_FOUND")
     return t.to_dict(include_result=include_result,
                     include_traceback=include_traceback)
 

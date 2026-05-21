@@ -1,6 +1,7 @@
 """选股 API（同步 + 异步两种）"""
 from typing import Optional
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter
+from api.errors import BadRequest
 
 from screen import screen_market
 from strategies import list_strategies, calc_optimal_top_n
@@ -56,15 +57,13 @@ def run_screen_sync(
     推荐网页使用：POST /api/tasks/screen 异步版本。
     """
     if strategy not in list_strategies():
-        raise HTTPException(400, f"unknown strategy: {strategy}")
-    try:
-        df = screen_market(
-            strategy=strategy, capital=capital, top_n_arg=top,
-            lookback=lookback, limit=limit,
-            enable_news=enable_news, verbose=False,
-        )
-    except Exception as e:
-        raise HTTPException(500, f"{type(e).__name__}: {e}")
+        raise BadRequest(f"未知策略：{strategy}", code="UNKNOWN_STRATEGY",
+                         detail=f"可选：{list_strategies()}")
+    df = screen_market(
+        strategy=strategy, capital=capital, top_n_arg=top,
+        lookback=lookback, limit=limit,
+        enable_news=enable_news, verbose=False,
+    )
     return {"strategy": strategy, **_screen_to_picks(df)}
 
 
@@ -87,7 +86,8 @@ def run_screen_async(
       3. status=done 时 result 字段含选股结果
     """
     if strategy not in list_strategies():
-        raise HTTPException(400, f"unknown strategy: {strategy}")
+        raise BadRequest(f"未知策略：{strategy}", code="UNKNOWN_STRATEGY",
+                         detail=f"可选：{list_strategies()}")
     task = task_mgr.submit(
         "screen", _do_screen,
         strategy=strategy, capital=capital, top=top,

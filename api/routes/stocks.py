@@ -1,7 +1,9 @@
 """股票数据查询 API"""
 from datetime import date
 from typing import Optional, List
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter
+
+from api.errors import NotFound
 
 import pandas as pd
 
@@ -48,7 +50,7 @@ def get_stock(ts_code: str):
             "FROM market_stock_basic WHERE ts_code=%s",
             conn, params=(ts_code,))
     if df.empty:
-        raise HTTPException(404, "股票不存在")
+        raise NotFound(f"股票 {ts_code} 不存在", code="STOCK_NOT_FOUND")
     return df.iloc[0].to_dict()
 
 

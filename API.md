@@ -12,6 +12,26 @@
 - **时间格式**: ISO 8601（如 `2026-05-21T08:12:36`）
 - **股票代码**: 含交易所后缀，如 `600487.SH` / `002028.SZ`
 
+### 错误响应统一格式
+所有错误（4xx / 5xx）都返回结构化 JSON：
+
+```json
+{
+  "error":   "ACCOUNT_NOT_FOUND",      // 机器可读错误码
+  "message": "账户 99999 不存在",       // 人类可读消息（中文）
+  "detail":  "..."                      // 可选详情
+}
+```
+
+常见错误码：
+
+| 状态码 | error 码 | 含义 |
+|:---:|---|---|
+| 400 | `BAD_REQUEST` / `UNKNOWN_STRATEGY` / `INVALID_MONTHS` 等 | 请求参数业务校验失败 |
+| 404 | `ACCOUNT_NOT_FOUND` / `STOCK_NOT_FOUND` / `TASK_NOT_FOUND` / `BACKTEST_NOT_FOUND` 等 | 资源不存在 |
+| 422 | `VALIDATION_ERROR` | Pydantic 参数类型/格式错误 |
+| 500 | `INTERNAL_ERROR` | 未捕获异常（已脱敏，不返回 Python 堆栈）|
+
 ---
 
 ## 🔧 系统接口
@@ -106,6 +126,48 @@ curl "http://localhost:8000/api/accounts/1/positions?asof=2026-05-13"
 
 ### `POST /api/accounts/{id}/stoploss?asof=2026-05-13`
 **触发止损检查**
+
+### `POST /api/accounts/{id}/auto-rebalance/async` ⭐ 新
+**【异步】自动调仓**：跑选股 + 清仓 + 等权买入 + 保存快照
+
+参数：
+- `limit`: 股票池规模（默认 500）
+- `asof`: 截面日期 YYYY-MM-DD（可选，默认今天）
+- `enable_news`: 是否启用消息面（默认 false）
+
+```bash
+curl -X POST "http://localhost:8000/api/accounts/1/auto-rebalance/async?limit=500"
+# → {"task_id":"xxx","status":"running","tip":"轮询 GET /api/tasks/xxx"}
+```
+
+`result` 字段示例：
+```json
+{
+  "account_id": 1,
+  "asof": "2026-05-21",
+  "strategy": "swing",
+  "sold":   { "n": 8, "revenue": 92341.5 },
+  "bought": { "n": 8, "spent": 91020.3, "skipped": [] },
+  "picks":  ["600094.SH", "002028.SZ"],
+  "total_equity": 95720.6
+}
+```
+
+### `POST /api/accounts/{id}/daily-run/async` ⭐ 新
+**【异步】跑单账户每日流程**：止损 → 判断调仓日 → 调仓 → 快照 → 复盘
+
+等价命令行：`python daily_runner.py --account {id} --date YYYYMMDD`
+
+参数：
+- `asof`: 日期（可选，默认今天）
+- `limit`: 选股阶段股票池规模（默认 500）
+- `dry_run`: true 时只看会做什么，不写入（默认 false）
+
+```bash
+curl -X POST "http://localhost:8000/api/accounts/1/daily-run/async?asof=2026-05-13&dry_run=true"
+```
+
+`result.log` 是完整的文本输出（4 个阶段日志），前端可直接展示。
 
 ---
 
@@ -211,6 +273,36 @@ curl "http://localhost:8000/api/backtest?strategy=swing&limit=20"
 ```bash
 curl http://localhost:8000/api/backtest/1
 ```
+
+### `POST /api/backtest/run/async` ⭐ 新
+**【异步】触发一次回测**：起子进程跑 `backtest_simple.py`，跑完自动入库
+
+参数：
+- `strategy`: short_term / swing / trend / ic_optimized（默认 swing）
+- `months`: 回测月数 1-60（默认 12）
+- `limit`: 股票池规模（默认 300）
+- `top`: 每周选股数（0=按 capital 自动算）
+- `capital`: 模拟资金量（元）；传了启用精确成本模型
+- `rebal_weeks`: 调仓间隔周数（1=每周, 2=两周, 4=每月，默认 1）
+
+```bash
+curl -X POST "http://localhost:8000/api/backtest/run/async?strategy=swing&months=12&capital=100000"
+# → {"task_id":"xxx"}
+```
+
+`result` 字段示例：
+```json
+{
+  "strategy": "swing",
+  "months": 12,
+  "limit": 300,
+  "elapsed_seconds": 287.4,
+  "run_id": 42,                      // 新建的回测 ID，可用 GET /api/backtest/{run_id} 查详情
+  "log_tail": "..."                  // 最后 30 行日志
+}
+```
+
+⚠️ 回测一次可能要 **几分钟到十几分钟**（取决于 limit 和 months），前端轮询间隔可设 10 秒+。
 
 ---
 

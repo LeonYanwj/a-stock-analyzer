@@ -10,13 +10,14 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from api import errors as api_errors
 from api.routes import accounts, screen, rate, backtest, stocks, tasks
 
 
 app = FastAPI(
     title="A 股量化系统 API",
     description="模拟盘、选股、评级、回测、数据查询",
-    version="0.1.0",
+    version="0.2.0",
 )
 
 # CORS：允许所有来源（初期调试用，生产环境收紧）
@@ -27,6 +28,9 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# 统一错误处理（所有异常 → 结构化 JSON）
+api_errors.install(app)
 
 
 # 注册路由
@@ -42,13 +46,13 @@ app.include_router(tasks.router)
 def root():
     return {
         "name": "A 股量化系统 API",
-        "version": "0.1.0",
+        "version": "0.2.0",
         "docs": "/docs",
         "endpoints": {
-            "accounts":  "/api/accounts",
+            "accounts":  "/api/accounts  (含 POST /{id}/auto-rebalance/async 和 daily-run/async)",
             "screen":    "/api/screen (同步) 或 POST /api/screen/async (异步)",
             "rate":      "/api/rate/{code}",
-            "backtest":  "/api/backtest",
+            "backtest":  "/api/backtest (含 POST /run/async 触发回测)",
             "stocks":    "/api/stocks",
             "tasks":     "/api/tasks (异步任务查询)",
         }

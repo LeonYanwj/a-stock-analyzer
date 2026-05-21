@@ -1,6 +1,8 @@
 """单股评级 API"""
 from datetime import datetime, timedelta
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter
+
+from api.errors import NotFound, BadRequest
 
 import pandas as pd
 import numpy as np
@@ -28,7 +30,7 @@ def _do_rate(code: str, strategy: str, no_flow: bool, no_news: bool,
     # 1. 历史日线
     daily = fetcher.get_daily(ts_code, start, asof)
     if daily.empty:
-        raise HTTPException(404, f"{ts_code} 历史数据为空")
+        raise NotFound(f"{ts_code} 历史数据为空", code="STOCK_DATA_EMPTY")
 
     factor_values = compute_tech_factors(daily)
     factor_values["pattern_score"] = compute_pattern_score(daily, lookback=5)
@@ -112,7 +114,8 @@ def rate_stock(code: str, strategy: str = "swing",
                no_flow: bool = False, no_news: bool = False):
     """单股 5 维度评级"""
     if strategy not in list_strategies():
-        raise HTTPException(400, f"unknown strategy: {strategy}")
+        raise BadRequest(f"未知策略：{strategy}", code="UNKNOWN_STRATEGY",
+                         detail=f"可选：{list_strategies()}")
     rating = _do_rate(code, strategy, no_flow, no_news)
 
     # 转 JSON
