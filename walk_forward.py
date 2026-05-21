@@ -33,7 +33,8 @@ from data.fetcher import DataFetcher
 from universe import get_universe
 from factors import compute_all_factors
 from selector import score, top_n
-from strategies import get_factor_weights
+from strategies import (get_factor_weights, calc_optimal_top_n,
+                        warn_if_capital_too_small)
 from backtest_simple import (
     TECH_ONLY_FACTORS, COMMISSION_TWO_WAY,
     _filter_tech_weights, get_rebal_dates,
@@ -159,7 +160,10 @@ def main():
     parser.add_argument("--train-months", type=int, default=6)
     parser.add_argument("--test-months", type=int, default=6)
     parser.add_argument("--limit", type=int, default=100)
-    parser.add_argument("--top", type=int, default=30)
+    parser.add_argument("--top", type=int, default=0,
+                        help="持仓数（默认 0=按 --capital 自动算，否则用 30）")
+    parser.add_argument("--capital", type=float, default=0,
+                        help="模拟资金量（元），自动算 top_n")
     parser.add_argument("--lookback", type=int, default=60)
     parser.add_argument("--rebal-weeks", type=int, default=2)
     parser.add_argument("--strategy", default="swing")
@@ -167,6 +171,11 @@ def main():
     parser.add_argument("--end-date", default=None,
                         help="回测结束日 YYYYMMDD，默认今天。用于历史窗口验证。")
     args = parser.parse_args()
+
+    if args.top == 0:
+        args.top = calc_optimal_top_n(args.capital) if args.capital > 0 else 30
+        if args.capital > 0:
+            print(f"[资金 {args.capital:,.0f} → 持仓 {args.top} 只]")
 
     print("=" * 60)
     print(f"Walk-Forward 验证: 训练 {args.train_months} 月 + 测试 {args.test_months} 月")

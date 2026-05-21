@@ -25,7 +25,8 @@ import pandas as pd
 
 from data.fetcher import DataFetcher
 from universe import get_universe
-from strategies import get_factor_weights
+from strategies import (get_factor_weights, calc_optimal_top_n,
+                        warn_if_capital_too_small)
 from backtest_simple import (
     _filter_tech_weights, get_rebal_dates,
     fetch_all_history, fetch_benchmark,
@@ -70,12 +71,19 @@ def main():
     parser.add_argument("--start-year", type=int, default=2022)
     parser.add_argument("--end-year",   type=int, default=2024)
     parser.add_argument("--limit", type=int, default=100)
-    parser.add_argument("--top",   type=int, default=30)
+    parser.add_argument("--top",   type=int, default=0,
+                        help="持仓数（默认 0=按 --capital 自动算，否则用 30）")
+    parser.add_argument("--capital", type=float, default=0)
     parser.add_argument("--lookback", type=int, default=60)
     parser.add_argument("--rebal-weeks", type=int, default=2)
     parser.add_argument("--strategy", default="swing")
     parser.add_argument("--stoploss", type=float, default=-0.08)
     args = parser.parse_args()
+
+    if args.top == 0:
+        args.top = calc_optimal_top_n(args.capital) if args.capital > 0 else 30
+        if args.capital > 0:
+            print(f"[资金 {args.capital:,.0f} → 持仓 {args.top} 只]")
 
     print("=" * 70)
     print(f"多窗口 Walk-Forward 验证: {args.start_year}~{args.end_year}, "

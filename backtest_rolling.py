@@ -29,7 +29,8 @@ from data.fetcher import DataFetcher
 from universe import get_universe
 from factors import compute_all_factors
 from selector import score, top_n
-from strategies import get_factor_weights
+from strategies import (get_factor_weights, calc_optimal_top_n,
+                        warn_if_capital_too_small)
 from backtest_simple import (
     TECH_ONLY_FACTORS, COMMISSION_TWO_WAY,
     _filter_tech_weights, get_rebal_dates,
@@ -148,7 +149,10 @@ def main():
     parser.add_argument("--start-year", type=int, default=2022)
     parser.add_argument("--end-year",   type=int, default=2024)
     parser.add_argument("--limit", type=int, default=500)
-    parser.add_argument("--top",   type=int, default=50)
+    parser.add_argument("--top",   type=int, default=0,
+                        help="持仓数（默认 0=按 --capital 自动算，否则用 50）")
+    parser.add_argument("--capital", type=float, default=0,
+                        help="模拟资金量（元），自动算 top_n")
     parser.add_argument("--lookback", type=int, default=60)
     parser.add_argument("--rebal-weeks", type=int, default=2)
     parser.add_argument("--ic-window", type=int, default=12,
@@ -158,6 +162,15 @@ def main():
     parser.add_argument("--strategy", default="swing")
     parser.add_argument("--stoploss", type=float, default=-0.08)
     args = parser.parse_args()
+
+    # 持仓数自动算
+    if args.top == 0:
+        args.top = calc_optimal_top_n(args.capital) if args.capital > 0 else 50
+        if args.capital > 0:
+            warn = warn_if_capital_too_small(args.capital)
+            if warn:
+                print(warn)
+            print(f"[资金 {args.capital:,.0f} → 持仓 {args.top} 只]")
 
     print("=" * 70)
     print(f"动态滚动调权重回测: {args.start_year}~{args.end_year}, {args.limit} 只主板")

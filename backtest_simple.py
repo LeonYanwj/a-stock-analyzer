@@ -41,7 +41,29 @@ TECH_ONLY_FACTORS = {
     "macd_hist", "macd_slope", "pattern_score",
 }
 
-COMMISSION_TWO_WAY = 0.0015   # 双边交易成本（0.15%/笔，含滑点）
+COMMISSION_TWO_WAY = 0.0015   # 双边交易成本（保守默认，0.15%/笔，含滑点）
+
+
+def calc_realistic_cost_rate(capital: float, top_n: int) -> float:
+    """根据资金量和持仓数算精确双边手续费率（含最低 5 元佣金陷阱）
+
+    A 股完整双边成本 = 佣金（含最低 5 元）×2 + 印花税（仅卖出）+ 滑点 ×2
+
+    例：100 万 / 50 只 → 每股 2 万：成本 0.35%
+        10 万 / 10 只 → 每股 1 万：成本 0.40%
+        4 万 / 5 只 → 每股 8000：成本 0.43%
+        4 万 / 50 只 → 每股 800：成本 1.55%（被强制 5 元佣金啃）
+    """
+    if capital <= 0 or top_n <= 0:
+        return COMMISSION_TWO_WAY
+    per_pos = capital / top_n
+    if per_pos >= 50_000:
+        commission_rate = 0.0002          # 万一双边
+    else:
+        commission_rate = 10.0 / per_pos  # 强制 5 元/笔 双边
+    stamp_rate = 0.001                    # 印花税卖出
+    slippage_rate = 0.002                 # 滑点双边
+    return commission_rate + stamp_rate + slippage_rate
 
 
 def _filter_tech_weights(weights: dict) -> dict:
@@ -217,6 +239,15 @@ def main():
     tech_weights = _filter_tech_weights(full_weights)
     print(f"  使用因子权重: {tech_weights}")
 
+    # 精确成本率（如果给了 --capital）
+    if args.capital > 0:
+        cost_rate = calc_realistic_cost_rate(args.capital, args.top)
+        print(f"  精确双边成本: {cost_rate*100:.3f}% "
+              f"(资金 {args.capital:,.0f}, 持仓 {args.top}, 单股 {args.capital/args.top:,.0f})")
+    else:
+        cost_rate = COMMISSION_TWO_WAY
+        print(f"  使用默认成本: {cost_rate*100:.2f}% (传 --capital 可启用精确模型)")
+
     # ---- 创建 backtest_run 记录（拿到 run_id）----
     run_id = None
     try:
@@ -303,7 +334,7 @@ def main():
             continue
 
         # 等权组合本期收益（扣双边手续费）
-        port_ret = float(np.mean(rets)) - COMMISSION_TWO_WAY
+        port_ret = float(np.mean(rets)) - cost_rate
         weekly_returns.append(port_ret)
         equity.append(equity[-1] * (1 + port_ret))
         chosen_log.append({"date": t, "n_picks": len(rets), "return": port_ret})

@@ -548,6 +548,22 @@ class DataFetcher:
 
         print(f"  [fund_flow] window={window}, rows={len(df)}, cols={list(df.columns)}")
         self._fund_flow_cache[window] = df
+
+        # 写入 market_fund_flow（按今天作为 snapshot_date，长期积累历史）
+        try:
+            from data.db import get_conn, upsert_df
+            from datetime import date
+            db_df = df.copy()
+            db_df["snapshot_date"] = date.today().strftime("%Y-%m-%d")
+            db_df["window_label"] = window
+            keep = ["snapshot_date", "ts_code", "window_label",
+                    "fund_inflow", "fund_outflow", "fund_net"]
+            db_df = db_df[[c for c in keep if c in db_df.columns]]
+            with get_conn() as conn:
+                upsert_df(conn, "market_fund_flow", db_df)
+        except Exception:
+            pass
+
         return df
 
     # ------------------------------------------------------------------
