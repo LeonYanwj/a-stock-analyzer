@@ -278,6 +278,18 @@ def main():
     else:
         print(f"  [结论] 按 IC 调权重在样本外**无显著差异**（{delta*100:+.2f}%）")
 
+    # DB 入库（仅存测试集新权重的最终结果作为 walk-forward 的代表）
+    from backtest_simple import save_backtest_to_db
+    run_id = save_backtest_to_db(
+        args.strategy,
+        test_start.strftime("%Y-%m-%d"),
+        end_dt.strftime("%Y-%m-%d"),
+        test_new,
+        note=f"walk_forward train={args.train_months}m test={args.test_months}m top={args.top}",
+    )
+    if run_id:
+        print(f"\n  [DB] run_id={run_id} (测试集新权重) 已入库")
+
 
 if __name__ == "__main__":
     main()

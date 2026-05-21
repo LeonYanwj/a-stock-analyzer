@@ -44,6 +44,41 @@ TECH_ONLY_FACTORS = {
 COMMISSION_TWO_WAY = 0.0015   # 双边交易成本（保守默认，0.15%/笔，含滑点）
 
 
+def save_backtest_to_db(strategy_name: str, start_date, end_date,
+                        metrics: dict, equity_pairs: list = None,
+                        note: str = "") -> int:
+    """统一的回测结果入库（供 backtest_rolling/walk_forward/multi_window 共用）
+
+    Args:
+        equity_pairs: list of (rebal_date, equity, period_return) 元组
+
+    Returns:
+        run_id（DB 失败返回 None）
+    """
+    try:
+        from data.db import (get_conn, get_strategy, create_backtest_run,
+                             finalize_backtest_run, insert_backtest_equity)
+        with get_conn() as conn:
+            strat = get_strategy(conn, strategy_name)
+            if not strat:
+                return None
+            run_id = create_backtest_run(conn, strat["strategy_id"],
+                                         start_date, end_date,
+                                         initial_capital=1.0, note=note)
+            m = dict(metrics)
+            if equity_pairs:
+                m.setdefault("final_value", float(equity_pairs[-1][1]))
+            finalize_backtest_run(conn, run_id, m)
+            if equity_pairs:
+                df = pd.DataFrame(equity_pairs,
+                                  columns=["rebal_date", "equity", "period_return"])
+                insert_backtest_equity(conn, run_id, df)
+        return run_id
+    except Exception as e:
+        print(f"  [warn] DB 入库失败: {type(e).__name__}: {str(e)[:80]}")
+        return None
+
+
 def calc_realistic_cost_rate(capital: float, top_n: int) -> float:
     """根据资金量和持仓数算精确双边手续费率（含最低 5 元佣金陷阱）
 

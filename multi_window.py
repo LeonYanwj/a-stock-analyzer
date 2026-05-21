@@ -145,8 +145,21 @@ def main():
             if len(keys) >= 2:
                 bm_ret = float(bm[keys[-1]] / bm[keys[0]] - 1)
 
+        # DB 入库（每个窗口的"测试新权重"）
+        from backtest_simple import save_backtest_to_db
+        run_id = save_backtest_to_db(
+            args.strategy,
+            vs.strftime("%Y-%m-%d"),
+            ve.strftime("%Y-%m-%d"),
+            test_new,
+            note=f"multi_window year={yr} new_weights top={args.top}",
+        )
+        if run_id:
+            print(f"  [DB] run_id={run_id} 已入库")
+
         results.append({
             "year": yr,
+            "run_id": run_id,
             "train_ann":    train_m["ann_return"],
             "test_old_ann": test_old["ann_return"],
             "test_new_ann": test_new["ann_return"],

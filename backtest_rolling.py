@@ -141,7 +141,12 @@ def run_rolling_backtest(panel_all, rebal_dates, base_weights,
             ic_buffer.append(ic_row)
 
     metrics = calc_metrics(pd.Series(equity), pd.Series(period_returns), interval_weeks=2)
-    return metrics, equity, period_returns, list(ic_buffer), weight_log
+    # 组装 equity_pairs 供 DB 入库（每期：调仓日, 期末权益, 本期收益）
+    equity_pairs = []
+    n_pairs = min(len(period_returns), len(rebal_dates) - 1)
+    for i in range(n_pairs):
+        equity_pairs.append((rebal_dates[i + 1], equity[i + 1], period_returns[i]))
+    return metrics, equity, period_returns, list(ic_buffer), weight_log, equity_pairs
 
 
 def main():
@@ -214,7 +219,7 @@ def main():
 
     # ---- 2. 动态滚动调权重 ----
     print(f"\n[2] 动态滚动调权重（IC 窗口 {args.ic_window} 期，启动期 {args.ic_min_obs} 期）...")
-    rolling_m, equity, _, _, weight_log = run_rolling_backtest(
+    rolling_m, equity, _, _, weight_log, equity_pairs = run_rolling_backtest(
         panel_all, rebal_dates, base_weights,
         top_n_val=args.top, lookback=args.lookback, stoploss=args.stoploss,
         ic_window=args.ic_window, ic_min_obs=args.ic_min_obs)
@@ -259,6 +264,19 @@ def main():
     n_dynamic = len(weight_log) - n_default
     print(f"\n  启动期（用默认权重）: {n_default} 期")
     print(f"  动态期（用历史 IC 调）: {n_dynamic} 期")
+
+    # 入库（仅保存动态调权重结果，作为脚本主要产出）
+    from backtest_simple import save_backtest_to_db
+    run_id = save_backtest_to_db(
+        args.strategy,
+        start_dt.strftime("%Y-%m-%d"),
+        end_dt.strftime("%Y-%m-%d"),
+        rolling_m,
+        equity_pairs=equity_pairs,
+        note=f"rolling ic_window={args.ic_window} top={args.top} limit={args.limit}",
+    )
+    if run_id:
+        print(f"\n  [DB] run_id={run_id} 已入库")
 
 
 if __name__ == "__main__":

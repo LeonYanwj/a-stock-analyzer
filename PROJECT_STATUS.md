@@ -39,16 +39,15 @@ Tier 4: 实盘 / ML     → 接券商 API、机器学习增强
 
 | Tier | 模块 | 进度 |
 |------|------|:----:|
-| 1 | 量化研究平台 | █████████░ 92% |
+| 1 | 量化研究平台 | █████████░ 96% |
 | 2 | 数据基础设施 | █████████░ 95% |
 | 3 | 模拟盘 | █████████░ 95% |
 | 4 | 实盘 / ML / 高级 | ░░░░░░░░░░ 0% |
-| | **整体** | **███████░░░ 75%** |
+| | **整体** | **████████░░ 80%** |
 
-**最新动态**：研究平台 + 数据基础双补齐到 90%+。
-新增 trade_calendar 入库 + financial DB 接入 + fund_flow 写回 +
-3 个 backtest 加 --capital + 手续费精确化模型。
-financial 全市场初始化后台运行中（60-90 分钟）。
+**最新动态**：研究平台 95%+。
+4 个 backtest 脚本全部支持 DB 写入（统一用 save_backtest_to_db helper）。
+financial 全市场初始化后台运行中（约 60-90 分钟）。
 
 ---
 
@@ -189,7 +188,7 @@ python init_data.py --limit 2000              # 全市场 stock_basic + 估值
 - [x] ~~初始化 `market_trade_calendar`~~ ✅ 8797 个交易日
 - [x] ~~改进手续费模型（精确最低 5 元佣金）~~ ✅ calc_realistic_cost_rate
 - [x] ~~`--capital` 推广到 4 个回测脚本~~ ✅
-- [ ] 把 DB 写入扩展到 backtest_rolling / walk_forward / multi_window（研究脚本，可选）
+- [x] ~~把 DB 写入扩展到 backtest_rolling / walk_forward / multi_window~~ ✅ 已统一接入
 - [ ] `market_universe_snapshot` 反推（需 list_date 数据，暂缓）
 
 ### 中期（Phase 2 模拟盘） ✅ **基本完成**
