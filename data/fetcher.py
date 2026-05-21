@@ -130,8 +130,23 @@ class DataFetcher:
                 print(f"  [warn] 东财 spot 失败，回退新浪: {type(e).__name__}")
 
         if df is None or df.empty:
-            df = ak.stock_zh_a_spot()
-            used = "sina"
+            # 新浪偶发返回 HTML（限流/服务问题），加重试
+            import time
+            last_err = None
+            for attempt in range(3):
+                try:
+                    df = ak.stock_zh_a_spot()
+                    used = "sina"
+                    break
+                except Exception as e:
+                    last_err = e
+                    if attempt < 2:
+                        wait = 5 * (attempt + 1)
+                        print(f"  [warn] 新浪 spot 失败 (尝试 {attempt+1}/3): {type(e).__name__}, "
+                              f"{wait}s 后重试...")
+                        time.sleep(wait)
+                    else:
+                        raise
 
         df = df.rename(columns=_SPOT_RENAME)
 
