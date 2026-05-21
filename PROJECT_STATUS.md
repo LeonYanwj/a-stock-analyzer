@@ -41,12 +41,12 @@ Tier 4: 实盘 / ML     → 接券商 API、机器学习增强
 |------|------|:----:|
 | 1 | 量化研究平台 | █████████░ 85% |
 | 2 | 数据基础设施 | █████████░ 88% |
-| 3 | 模拟盘 | ░░░░░░░░░░ 0% |
+| 3 | 模拟盘 | ████░░░░░░ 40% |
 | 4 | 实盘 / ML / 高级 | ░░░░░░░░░░ 0% |
-| | **整体** | **█████░░░░░ 45%** |
+| | **整体** | **█████░░░░░ 53%** |
 
-**最新动态**：backtest_simple.py 已集成 DB 写入（每次回测自动存档），
-新增 `query_backtest.py` 历史回测查询工具。
+**最新动态**：Phase 2 模拟盘 MVP 跑通！账户/持仓/成交/止损/复盘全链路可用。
+新增 `paper_engine.py` + `paper.py` CLI（精确成本：佣金最低 5 元 + 印花税 + 滑点）。
 
 ---
 
@@ -70,7 +70,9 @@ Tier 4: 实盘 / ML     → 接券商 API、机器学习增强
 | | `rate.py` | 单股深度评级 |
 | | `main.py` | 旧单股回测（保留兼容）|
 | | `demo_backtest.py` | 离线回测演示 |
-| | `query_backtest.py` | **历史回测查询工具（新）** |
+| | `query_backtest.py` | 历史回测查询工具 |
+| | `paper_engine.py` | **模拟盘核心引擎（新）** |
+| | `paper.py` | **模拟盘 CLI（新）** |
 | **回测/验证** | `backtest_simple.py` | 基础回测（IC + 止损 + DB 写入）|
 | | `backtest_rolling.py` | 动态滚动调权重 |
 | | `walk_forward.py` | 样本外验证 |
@@ -93,7 +95,7 @@ Tier 4: 实盘 / ML     → 接券商 API、机器学习增强
 | `market_universe_snapshot` | 0 | ❌ 待积累 |
 | `strategy_config` | 3 | ✅ short_term / swing / trend |
 | `backtest_run` 等 (4 张) | 累积中 | ✅ **每次 backtest_simple.py 自动写入** |
-| `paper_*` (5 张) | 0 | ⏳ Phase 2 模拟盘占位 |
+| `paper_*` (5 张) | ✅ 累积中 | **Phase 2 MVP 已上线** |
 
 ### 3.3 14 个因子（5 维度）
 
@@ -141,6 +143,18 @@ python query_backtest.py --run 5               # 查看第 5 次详情
 python query_backtest.py --compare 3 5 7       # 对比多次
 ```
 
+### 模拟盘（Phase 2）
+```bash
+python paper.py create --name "swing-A" --capital 100000 --strategy swing
+python paper.py list                              # 看所有账户
+python paper.py rebalance --account 1 --picks 600487.SH 002028.SZ ...   # 调仓
+python paper.py stoploss --account 1              # 检查止损
+python paper.py snapshot --account 1              # 存今日权益
+python paper.py positions --account 1             # 持仓
+python paper.py trades --account 1                # 成交
+python paper.py report --account 1                # 复盘报告
+```
+
 ### 数据初始化（一次性）
 ```bash
 python migrate_cache_to_db.py                 # CSV cache → MySQL
@@ -161,12 +175,13 @@ python init_data.py --limit 2000              # 全市场 stock_basic + 估值
 - [ ] `--capital` 推广到其他 3 个回测脚本
 
 ### 中期（Phase 2 模拟盘，半天～1 天）
-- [ ] 模拟账户管理（账户/初始资金/当前权益）
-- [ ] 每日自动选股 + 模拟下单
-- [ ] 持仓跟踪 + 止损监控
-- [ ] 每日复盘报告（涨跌/止损/调仓）
-- [ ] 多策略账户并行（短线/波段/趋势账户独立记账）
-- [ ] 每日 cron 定时运行
+- [x] ~~模拟账户管理（账户/初始资金/当前权益）~~ ✅ paper_engine.py
+- [x] ~~持仓跟踪 + 止损监控~~ ✅ check_stoploss
+- [x] ~~每日复盘报告（涨跌/止损/调仓）~~ ✅ daily_report
+- [ ] **自动调仓**：把 screen.py 的选股逻辑嵌入 paper.py `auto-rebalance`
+- [ ] **多策略账户并行**：建 3 个账户对应 short_term/swing/trend
+- [ ] **每日 cron 定时运行**：写 daily_runner.py
+- [ ] 修复 pandas SQLAlchemy 警告（用 SQLAlchemy engine 替代 pymysql connection）
 
 ### 长期（Phase 3/4，1-2 周以上）
 - [ ] 实盘 API 对接（CTP / 通达信仿真）
