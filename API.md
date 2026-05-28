@@ -239,7 +239,7 @@ curl "http://localhost:8000/api/screen/optimal-top-n?capital=100000"
 ## ⭐ 评级接口
 
 ### `GET /api/rate/{code}?strategy=swing&no_flow=false&no_news=false`
-**单股 5 维度评级**
+**【同步】单股 5 维度评级**（一次性返回，慢的话浏览器会卡 5-40 秒）
 
 ```bash
 curl "http://localhost:8000/api/rate/002028?strategy=swing"
@@ -268,6 +268,79 @@ curl "http://localhost:8000/api/rate/600487.SH?strategy=trend&no_news=true"
   ]
 }
 ```
+
+### `GET /api/rate/{code}/stream?strategy=swing&no_flow=false&no_news=false` ⭐ 新
+**【SSE 流式】单股评级实时进度推送**
+
+一个 HTTP 连接保持打开，分阶段推送 SSE 事件（前端能看到"拉历史/算因子/拉估值/拉财务/算评级..."逐步推进，不会以为卡死）。
+
+#### 事件 schema
+
+每个事件以 `data: <json>\n\n` 行格式发送（标准 SSE）：
+
+| 字段组合 | 含义 |
+|---|---|
+| `{progress: int, msg: str}` | 进度更新（progress 0-100，msg 当前阶段描述）|
+| `{progress: 100, result: {...}}` | 最终评级结果（同步版的 JSON 结构）|
+| `{error: str, message: str}` | 失败（如 STOCK_DATA_EMPTY），后端自动关闭连接 |
+
+#### 命令行测试（用 curl -N 关闭缓冲）
+
+```bash
+curl -N "http://localhost:8000/api/rate/600519/stream?strategy=swing"
+```
+
+输出示例：
+```
+data: {"progress": 3, "msg": "解析股票代码..."}
+
+data: {"progress": 15, "msg": "拉历史日线 600519.SH..."}
+
+data: {"progress": 30, "msg": "计算量价因子..."}
+
+data: {"progress": 50, "msg": "拉名称 spot..."}
+
+data: {"progress": 100, "result": {"ts_code": "600519.SH", "name": "贵州茅台", ...}}
+```
+
+#### 前端 JS 用法
+
+浏览器原生 `EventSource` API，**不需要轮询**：
+
+```javascript
+const ev = new EventSource('/api/rate/600519/stream?strategy=swing');
+
+ev.onmessage = (e) => {
+  const d = JSON.parse(e.data);
+
+  if (d.error) {
+    showError(d.message);
+    ev.close();
+    return;
+  }
+
+  if (d.result) {
+    showRating(d.result);  // 完整评级结果，跟同步版 schema 一致
+    ev.close();            // ⚠️ 拿到结果一定要关，否则连接挂着
+    return;
+  }
+
+  if (d.progress != null) {
+    progressBar.value = d.progress;
+    progressLabel.text = d.msg;
+  }
+};
+
+ev.onerror = (e) => {
+  ev.close();
+};
+```
+
+#### 注意事项
+
+- 若过 nginx 反代，需要 `proxy_buffering off`（响应头已经带了 `X-Accel-Buffering: no`，nginx 1.5.6+ 会识别）
+- IE 不支持 EventSource，要兼容老浏览器用 polyfill
+- 拿到 `result` 或 `error` 后**前端务必 `ev.close()`**，否则浏览器保持连接
 
 ---
 
