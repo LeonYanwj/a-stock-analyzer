@@ -96,16 +96,24 @@ def get_account(account_id: int) -> dict:
         return df.iloc[0].to_dict()
 
 
-def list_accounts() -> pd.DataFrame:
+def list_accounts(status: str = "all") -> pd.DataFrame:
+    """列出账户
+
+    Args:
+        status: 'active' 仅运行中 / 'terminated' 仅已终止 / 'all' 全部
+    """
+    sql = ("SELECT a.account_id, a.account_name, s.strategy_name, "
+           "a.initial_capital, a.current_cash, a.current_equity, "
+           "ROUND((a.current_equity - a.initial_capital) / a.initial_capital * 100, 2) AS return_pct, "
+           "a.started_at, a.is_active, a.ended_at "
+           "FROM paper_account a JOIN strategy_config s USING(strategy_id) ")
+    if status == "active":
+        sql += "WHERE a.is_active=1 "
+    elif status == "terminated":
+        sql += "WHERE a.is_active=0 "
+    sql += "ORDER BY a.started_at DESC"
     with get_conn() as conn:
-        df = pd.read_sql(
-            "SELECT a.account_id, a.account_name, s.strategy_name, "
-            "a.initial_capital, a.current_cash, a.current_equity, "
-            "ROUND((a.current_equity - a.initial_capital) / a.initial_capital * 100, 2) AS return_pct, "
-            "a.started_at, a.is_active "
-            "FROM paper_account a JOIN strategy_config s USING(strategy_id) "
-            "ORDER BY a.started_at DESC", conn)
-        return df
+        return pd.read_sql(sql, conn)
 
 
 # -------------------- 价格查询 --------------------
@@ -211,23 +219,115 @@ def execute_sell(account_id: int, ts_code: str, qty: int, price: float,
     return {"order_id": oid, "revenue": revenue, "price": actual_price, "fees": fees}
 
 
-def sell_all(account_id: int, trade_date, reason: str = "REBALANCE") -> dict:
-    """清仓"""
+def sell_all(account_id: int, trade_date, reason: str = "REBALANCE",
+             price_override: dict = None) -> dict:
+    """清仓
+
+    Args:
+        price_override: {ts_code: price} 用指定价格成交，没传则用 DB 收盘价
+    """
     positions = get_positions(account_id)
     if positions.empty:
-        return {"n_sold": 0, "total_revenue": 0}
+        return {"n_sold": 0, "total_revenue": 0, "skipped": []}
     trade_date = _norm_date(trade_date)
+    price_override = price_override or {}
     total_rev = 0
     n = 0
+    skipped = []
     for _, p in positions.iterrows():
-        price = get_close_price(p["ts_code"], trade_date)
+        tc = p["ts_code"]
+        price = price_override.get(tc) or get_close_price(tc, trade_date)
         if price is None:
-            print(f"  [skip] {p['ts_code']} 当日无价")
+            skipped.append({"ts_code": tc, "reason": "no_price"})
             continue
-        r = execute_sell(account_id, p["ts_code"], int(p["qty"]), price, trade_date, reason)
+        r = execute_sell(account_id, tc, int(p["qty"]), price, trade_date, reason)
         total_rev += r["revenue"]
         n += 1
-    return {"n_sold": n, "total_revenue": total_rev}
+    return {"n_sold": n, "total_revenue": total_rev, "skipped": skipped}
+
+
+def terminate_account(account_id: int, trade_date=None,
+                      price_override: dict = None) -> dict:
+    """终止账户：卖光所有持仓 + 归档最终权益 + 设 is_active=0
+
+    Args:
+        trade_date: 终止日（默认今天）
+        price_override: {ts_code: realtime_price} 用实时价卖出，没传则用 DB 收盘价
+
+    Returns:
+        { account_id, n_sold, total_revenue, final_cash, final_equity,
+          final_return_pct, ended_at, skipped }
+    """
+    acc = get_account(account_id)
+    if acc is None:
+        raise ValueError(f"账户 {account_id} 不存在")
+    if int(acc.get("is_active", 0)) == 0:
+        raise ValueError(f"账户 {account_id} 已经终止过，不能重复终止")
+
+    trade_date = _norm_date(trade_date or date.today())
+    initial_capital = float(acc["initial_capital"])
+
+    # 1. 卖光（带实时价 override）
+    sell_result = sell_all(account_id, trade_date, reason="TERMINATE",
+                           price_override=price_override)
+
+    # 2. 重新读账户拿到 sell 后的现金
+    acc_after = get_account(account_id)
+    final_cash = float(acc_after["current_cash"])
+    # 卖光后理论上没持仓了，但 skipped 的可能还有市值
+    _, mv, final_equity = calc_total_equity(account_id, trade_date)
+
+    # 3. 累计收益率
+    if initial_capital > 0:
+        final_return_pct = (final_equity - initial_capital) / initial_capital
+    else:
+        final_return_pct = 0.0
+
+    # 4. 标记账户终止
+    ended_at = datetime.now()
+    with get_conn() as conn:
+        cur = conn.cursor()
+        cur.execute(
+            "UPDATE paper_account SET is_active=0, ended_at=%s, "
+            "final_equity=%s, final_return_pct=%s, current_equity=%s "
+            "WHERE account_id=%s",
+            (ended_at, final_equity, final_return_pct, final_equity, account_id))
+        cur.close()
+
+    # 5. 顺便存一份当日权益快照（用于历史回看）
+    try:
+        save_equity_snapshot(account_id, trade_date)
+    except Exception:
+        pass
+
+    return {
+        "account_id": account_id,
+        "ended_at": ended_at.isoformat(),
+        "n_sold": sell_result["n_sold"],
+        "total_revenue": sell_result["total_revenue"],
+        "skipped": sell_result.get("skipped", []),
+        "final_cash": final_cash,
+        "remaining_market_value": float(mv),
+        "final_equity": float(final_equity),
+        "initial_capital": initial_capital,
+        "final_return_pct": float(final_return_pct),
+    }
+
+
+def list_terminated_accounts() -> pd.DataFrame:
+    """列出所有已终止账户，含持续天数、累计收益率（用于历史归档展示）"""
+    with get_conn() as conn:
+        return pd.read_sql(
+            "SELECT a.account_id, a.account_name, s.strategy_name, "
+            "a.initial_capital, a.final_equity, a.final_return_pct, "
+            "a.started_at, a.ended_at, "
+            "DATEDIFF(a.ended_at, a.started_at) AS days_run, "
+            "a.note "
+            "FROM paper_account a "
+            "LEFT JOIN strategy_config s USING(strategy_id) "
+            "WHERE a.is_active=0 "
+            "ORDER BY a.ended_at DESC",
+            conn)
 
 
 def buy_equal_weight(account_id: int, picks: list, trade_date,

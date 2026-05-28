@@ -95,8 +95,9 @@ curl "http://localhost:8000/api/tasks/xxx"
 |---|---|---|---|
 | GET | `/` | A | API 根路径概况 |
 | GET | `/health` | A | 健康检查 + DB 连通 |
-| GET | `/api/accounts` | A | 所有账户列表 |
-| POST | `/api/accounts` | A | 创建账户 |
+| GET | `/api/accounts?status=active` | A | 列出账户（默认仅运行中）|
+| POST | `/api/accounts` | A | 创建新模拟盘（资金可自定义）|
+| GET | `/api/accounts/history` | A | 已终止模拟盘历史 ⭐ |
 | GET | `/api/accounts/{id}` | A | 账户详情 |
 | GET | `/api/accounts/{id}/positions` | A* | 持仓（外网 → 建议用 stream）|
 | **GET** | **`/api/accounts/{id}/positions/stream`** | **B** | 持仓 SSE 流式 ⭐ |
@@ -107,6 +108,7 @@ curl "http://localhost:8000/api/tasks/xxx"
 | POST | `/api/accounts/{id}/stoploss` | A | 触发止损检查 |
 | POST | `/api/accounts/{id}/auto-rebalance/async` | C | 自动调仓任务 |
 | POST | `/api/accounts/{id}/daily-run/async` | C | 单账户每日流程 |
+| POST | `/api/accounts/{id}/terminate/async` | C | 终止模拟盘 ⭐（清仓+归档）|
 | GET | `/api/screen` | A* | 选股同步（小数据量用）|
 | POST | `/api/screen/async` | C | 选股异步任务 |
 | GET | `/api/screen/strategies` | A | 策略列表 |
@@ -181,8 +183,34 @@ curl http://localhost:8000/health
 
 ## 📊 账户接口（模拟盘）
 
-### `GET /api/accounts`
-**列出所有模拟账户**
+### 模拟盘生命周期
+
+每个模拟盘账户 = 一次独立的策略实盘：
+
+```
+创建 (initial_capital 自定义)
+   ↓
+运行中 (is_active=1, 每天 daily_runner 自动调仓/止损/快照)
+   ↓
+点击「结束」终止 (sell all + 归档 final_equity / final_return_pct)
+   ↓
+归档历史 (is_active=0, GET /accounts/history 可查)
+```
+
+**同一策略可同时跑多个**（不同初始资金/不同时段实验），互不影响。
+**运行中不能改 initial_capital**——想换规模就新建一个账户。
+
+### `GET /api/accounts?status=active`
+**列出模拟账户**
+
+参数：
+- `status`: `active`（默认，仅运行中）/ `terminated`（仅已终止）/ `all`（全部）
+
+```bash
+curl "http://localhost:8000/api/accounts"                   # 运行中
+curl "http://localhost:8000/api/accounts?status=terminated" # 已终止
+curl "http://localhost:8000/api/accounts?status=all"        # 全部
+```
 
 ```bash
 curl http://localhost:8000/api/accounts
@@ -206,10 +234,66 @@ curl http://localhost:8000/api/accounts
 ```
 
 ### `POST /api/accounts?name=xxx&capital=100000&strategy=swing`
-**创建新账户**
+**创建新账户**（即"下发新模拟盘任务"，资金可自定义）
 
 ```bash
 curl -X POST "http://localhost:8000/api/accounts?name=test-A&capital=50000&strategy=swing"
+```
+
+### `GET /api/accounts/history` ⭐ 新
+**已终止的模拟盘历史归档列表**
+
+返回字段含初始资金、最终权益、累计收益率、持续天数、起止时间、策略：
+
+```json
+[
+  {
+    "account_id": 4,
+    "account_name": "test-A",
+    "strategy_name": "swing",
+    "initial_capital": 10000.0,
+    "final_equity": 10520.0,
+    "final_return_pct": 0.052,
+    "started_at": "2026-05-13T09:30:00",
+    "ended_at": "2026-05-28T15:00:00",
+    "days_run": 15,
+    "note": null
+  }
+]
+```
+
+### `POST /api/accounts/{id}/terminate/async` ⭐ 新
+**【异步】终止模拟盘**：卖光全部持仓 + 归档最终权益和累计收益率
+
+是模拟盘的"结束"按钮对应的接口。终止后：
+- `is_active=0`、`ended_at=now()`
+- 计算 `final_equity` 和 `final_return_pct` 写入 `paper_account`
+- 账户从 `/api/accounts?status=active` 移除，进入 `/api/accounts/history`
+- **不可恢复**（重复调用会返回 400 `ACCOUNT_ALREADY_TERMINATED`）
+
+参数：
+- `use_realtime`：true（默认）拉 AKShare 实时价卖出；false 用 DB 收盘价
+
+```bash
+curl -X POST "http://localhost:8000/api/accounts/4/terminate/async"
+# → {"task_id": "xxx"}
+# 轮询：GET /api/tasks/xxx
+```
+
+`result` 字段示例：
+```json
+{
+  "account_id": 4,
+  "ended_at": "2026-05-28T15:00:12",
+  "n_sold": 8,
+  "total_revenue": 95430.5,
+  "skipped": [],
+  "final_cash": 95430.5,
+  "remaining_market_value": 0.0,
+  "final_equity": 95430.5,
+  "initial_capital": 100000.0,
+  "final_return_pct": -0.0457
+}
 ```
 
 ### `GET /api/accounts/{id}/positions`

@@ -7,7 +7,8 @@ from fastapi import APIRouter
 from fastapi.responses import StreamingResponse
 
 import paper_engine as eng
-from api.schemas import (AccountSummary, PositionRow, TradeRow, EquityPoint)
+from api.schemas import (AccountSummary, AccountHistoryRow, PositionRow,
+                          TradeRow, EquityPoint)
 from api.errors import NotFound, BadRequest
 from api import tasks as task_mgr
 
@@ -16,12 +17,36 @@ router = APIRouter(prefix="/api/accounts", tags=["accounts"])
 
 
 @router.get("", response_model=List[AccountSummary])
-def list_accounts():
-    """所有模拟账户列表"""
-    df = eng.list_accounts()
+def list_accounts(status: str = "active"):
+    """模拟盘账户列表
+
+    Args:
+        status: active (默认，仅运行中) / terminated (仅已终止) / all (全部)
+    """
+    if status not in ("active", "terminated", "all"):
+        raise BadRequest(f"status 取值: active/terminated/all，收到 {status}",
+                         code="INVALID_STATUS")
+    df = eng.list_accounts(status=status)
     if df.empty:
         return []
     return df.to_dict("records")
+
+
+@router.get("/history", response_model=List[AccountHistoryRow])
+def list_account_history():
+    """已终止的模拟盘历史列表（含持续天数、最终收益率）"""
+    df = eng.list_terminated_accounts()
+    if df.empty:
+        return []
+    rows = df.to_dict("records")
+    # 把 numpy 类型转 Python 原生
+    for r in rows:
+        for k in ("initial_capital", "final_equity", "final_return_pct"):
+            if r.get(k) is not None:
+                r[k] = float(r[k])
+        if r.get("days_run") is not None:
+            r["days_run"] = int(r["days_run"])
+    return rows
 
 
 @router.post("", response_model=dict)
@@ -378,6 +403,72 @@ def daily_run_async(
     task = task_mgr.submit(
         "daily_run", _do_daily_run, params=params,
         account_id=account_id, asof=asof, limit=limit, dry_run=dry_run,
+    )
+    return {"task_id": task.task_id, "status": task.status,
+            "tip": f"轮询 GET /api/tasks/{task.task_id}"}
+
+
+# -------------------- 终止模拟盘（清仓 + 归档） --------------------
+def _do_terminate(task, account_id: int, use_realtime: bool):
+    """异步任务：卖光持仓 + 归档 final_equity / final_return_pct + is_active=0
+
+    步骤:
+      1. 查持仓
+      2. (可选) 拉 AKShare spot 实时价
+      3. 卖光全部持仓
+      4. 写 paper_account 归档字段
+    """
+    task.report(5, "查账户...")
+    acc = eng.get_account(account_id)
+    if acc is None:
+        raise NotFound(f"账户 {account_id} 不存在", code="ACCOUNT_NOT_FOUND")
+    if int(acc.get("is_active", 0)) == 0:
+        raise BadRequest(f"账户 {account_id} 已终止，不能重复终止",
+                         code="ACCOUNT_ALREADY_TERMINATED")
+
+    task.report(15, "查当前持仓...")
+    df = eng.get_positions(account_id)
+
+    price_override = None
+    if use_realtime and not df.empty:
+        task.report(40, f"拉 AKShare 实时价（{len(df)} 只持仓，外网可能慢）...")
+        price_override = _get_realtime_prices(df["ts_code"].tolist())
+        task.report(70, f"实时价 {len(price_override)}/{len(df)} 只，开始卖出...")
+    else:
+        task.report(50, "无持仓需要卖出..." if df.empty else "用 DB 收盘价卖出...")
+
+    task.report(80, "执行清仓 + 归档...")
+    result = eng.terminate_account(account_id, price_override=price_override)
+
+    task.report(100, f"已终止，最终权益 {result['final_equity']:.2f} "
+                     f"({result['final_return_pct']*100:+.2f}%)")
+    return result
+
+
+@router.post("/{account_id}/terminate/async")
+def terminate_account_async(account_id: int, use_realtime: bool = True):
+    """【异步】终止模拟盘：卖光全部持仓 + 归档最终权益和累计收益率
+
+    生命周期：is_active=1 → 调用本接口 → is_active=0（不可恢复）
+    终止后账户进入"历史归档"，可通过 GET /api/accounts/history 列出。
+
+    Args:
+        use_realtime: 用 AKShare 实时价卖出（默认 true，盘后自动用收盘价）
+
+    返回 task_id，轮询 GET /api/tasks/{task_id}
+    结果字段：n_sold/total_revenue/final_cash/final_equity/final_return_pct/ended_at
+    """
+    acc = eng.get_account(account_id)
+    if acc is None:
+        raise NotFound(f"账户 {account_id} 不存在", code="ACCOUNT_NOT_FOUND")
+    if int(acc.get("is_active", 0)) == 0:
+        raise BadRequest(f"账户 {account_id} 已终止（ended_at={acc.get('ended_at')}）",
+                         code="ACCOUNT_ALREADY_TERMINATED")
+
+    params = {"account_id": account_id, "use_realtime": use_realtime}
+    task = task_mgr.submit(
+        "terminate", _do_terminate, params=params,
+        account_id=account_id, use_realtime=use_realtime,
     )
     return {"task_id": task.task_id, "status": task.status,
             "tip": f"轮询 GET /api/tasks/{task.task_id}"}

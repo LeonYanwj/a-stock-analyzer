@@ -15,6 +15,21 @@ class AccountSummary(BaseModel):
     return_pct: float
     started_at: datetime
     is_active: int
+    ended_at: Optional[datetime] = None       # 终止时间（is_active=0 时有值）
+
+
+class AccountHistoryRow(BaseModel):
+    """已终止账户的历史归档行"""
+    account_id: int
+    account_name: str
+    strategy_name: str
+    initial_capital: float
+    final_equity: Optional[float] = None
+    final_return_pct: Optional[float] = None
+    started_at: datetime
+    ended_at: Optional[datetime] = None
+    days_run: Optional[int] = None
+    note: Optional[str] = None
 
 
 class PositionRow(BaseModel):

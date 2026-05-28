@@ -196,17 +196,20 @@ CREATE TABLE IF NOT EXISTS backtest_factor_ic (
 
 -- 13. 模拟盘账户
 CREATE TABLE IF NOT EXISTS paper_account (
-    account_id      INT         AUTO_INCREMENT PRIMARY KEY,
-    account_name    VARCHAR(50) NOT NULL UNIQUE     COMMENT '账户名 如 "短线-A"',
-    strategy_id     INT         NOT NULL,
-    initial_capital DECIMAL(20,2) NOT NULL,
-    current_cash    DECIMAL(20,2) NOT NULL          COMMENT '可用现金',
-    current_equity  DECIMAL(20,2)                   COMMENT '当前总权益（含持仓市值）',
-    started_at      TIMESTAMP   DEFAULT CURRENT_TIMESTAMP,
-    is_active       TINYINT     DEFAULT 1,
-    note            VARCHAR(200),
+    account_id       INT         AUTO_INCREMENT PRIMARY KEY,
+    account_name     VARCHAR(50) NOT NULL UNIQUE     COMMENT '账户名 如 "短线-A"',
+    strategy_id      INT         NOT NULL,
+    initial_capital  DECIMAL(20,2) NOT NULL,
+    current_cash     DECIMAL(20,2) NOT NULL          COMMENT '可用现金',
+    current_equity   DECIMAL(20,2)                   COMMENT '当前总权益（含持仓市值）',
+    started_at       TIMESTAMP   DEFAULT CURRENT_TIMESTAMP,
+    is_active        TINYINT     DEFAULT 1           COMMENT '1=运行中, 0=已终止',
+    ended_at         TIMESTAMP NULL                  COMMENT '终止时间（is_active=0 时填）',
+    final_equity     DECIMAL(20,2)                   COMMENT '终止时最终权益',
+    final_return_pct DECIMAL(10,4)                   COMMENT '终止时累计收益率',
+    note             VARCHAR(200),
     FOREIGN KEY (strategy_id) REFERENCES strategy_config(strategy_id)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT '模拟盘账户';
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT '模拟盘账户（is_active=1 运行中 / 0 已归档）';
 
 -- 14. 模拟盘订单（下单意图，可能未成交）
 CREATE TABLE IF NOT EXISTS paper_order (
