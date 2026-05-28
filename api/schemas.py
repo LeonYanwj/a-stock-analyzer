@@ -19,6 +19,7 @@ class AccountSummary(BaseModel):
 
 class PositionRow(BaseModel):
     ts_code: str
+    name: Optional[str] = None               # 股票名称（来自 market_stock_basic）
     qty: int
     avg_cost: float
     current_price: Optional[float] = None
@@ -31,8 +32,10 @@ class PositionRow(BaseModel):
 class TradeRow(BaseModel):
     trade_id: int
     trade_date: date
+    trade_time: Optional[datetime] = None    # 精确到秒的成交时间
     side: str
     ts_code: str
+    name: Optional[str] = None               # 股票名称
     qty: int
     price: float
     amount: float

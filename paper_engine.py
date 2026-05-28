@@ -124,9 +124,14 @@ def get_close_price(ts_code: str, trade_date: date) -> float:
 
 # -------------------- 持仓 --------------------
 def get_positions(account_id: int) -> pd.DataFrame:
+    """持仓明细。JOIN market_stock_basic 带出股票名称。"""
     with get_conn() as conn:
         return pd.read_sql(
-            "SELECT * FROM paper_position WHERE account_id=%s ORDER BY ts_code",
+            "SELECT p.account_id, p.ts_code, b.name, p.qty, p.avg_cost, "
+            "p.open_date, p.last_update "
+            "FROM paper_position p "
+            "LEFT JOIN market_stock_basic b ON b.ts_code = p.ts_code "
+            "WHERE p.account_id=%s ORDER BY p.ts_code",
             conn, params=(account_id,))
 
 
@@ -341,11 +346,15 @@ def save_equity_snapshot(account_id: int, trade_date) -> float:
 
 # -------------------- 查询/报告 --------------------
 def get_trades(account_id: int, limit: int = 50) -> pd.DataFrame:
+    """成交流水。JOIN market_stock_basic 带名称，并返回精确到秒的 trade_time。"""
     with get_conn() as conn:
         return pd.read_sql(
-            "SELECT trade_id, trade_date, side, ts_code, qty, price, amount, "
-            "commission, reason FROM paper_trade WHERE account_id=%s "
-            "ORDER BY trade_date DESC, trade_id DESC LIMIT %s",
+            "SELECT t.trade_id, t.trade_date, t.trade_time, t.side, "
+            "t.ts_code, b.name, t.qty, t.price, t.amount, t.commission, t.reason "
+            "FROM paper_trade t "
+            "LEFT JOIN market_stock_basic b ON b.ts_code = t.ts_code "
+            "WHERE t.account_id=%s "
+            "ORDER BY t.trade_time DESC, t.trade_id DESC LIMIT %s",
             conn, params=(account_id, limit))
 
 

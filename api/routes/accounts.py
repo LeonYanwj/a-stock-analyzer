@@ -100,6 +100,7 @@ def get_positions(account_id: int, asof: Optional[date] = None,
         ret = price / avg_cost - 1 if avg_cost > 0 else 0
         rows.append({
             "ts_code": ts_code,
+            "name": p.get("name"),
             "qty": int(p["qty"]),
             "avg_cost": avg_cost,
             "current_price": price,
