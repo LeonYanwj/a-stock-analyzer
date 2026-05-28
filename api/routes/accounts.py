@@ -1,7 +1,10 @@
 """账户/持仓/成交/复盘 API"""
+import json
+import traceback
 from datetime import date
 from typing import List, Optional
 from fastapi import APIRouter
+from fastapi.responses import StreamingResponse
 
 import paper_engine as eng
 from api.schemas import (AccountSummary, PositionRow, TradeRow, EquityPoint)
@@ -59,33 +62,12 @@ def _get_realtime_prices(ts_codes: list) -> dict:
         return {}
 
 
-@router.get("/{account_id}/positions", response_model=List[PositionRow])
-def get_positions(account_id: int, asof: Optional[date] = None,
-                  use_realtime: bool = True):
-    """账户当前持仓（含价格/收益率）
-
-    价格优先级：
-      - 不传 asof + use_realtime=true → 拉 spot 拿实时价（盘中是分时价，盘后是当日收盘）
-      - 传 asof 或者 use_realtime=false → 用 DB 收盘价（历史日期或离线场景）
-      - 实时价拉失败 → 自动回退 DB 收盘价
-      - 都没有 → 用持仓成本（避免 None）
-
-    返回字段 `price_source`：realtime / close / cost
-    """
-    df = eng.get_positions(account_id)
-    if df.empty:
-        return []
-
-    use_date = asof or date.today()
-    # 默认场景：不传 asof（看现在）+ use_realtime → 试拉 spot
-    want_realtime = use_realtime and asof is None
-    realtime_prices = _get_realtime_prices(df["ts_code"].tolist()) if want_realtime else {}
-
+def _build_position_rows(df, realtime_prices: dict, use_date) -> list:
+    """从持仓 DataFrame + 实时价 dict 算每只股票的最终展示行（同步/SSE 共用）"""
     rows = []
     for _, p in df.iterrows():
         avg_cost = float(p["avg_cost"])
         ts_code = p["ts_code"]
-        # 价格选择
         if ts_code in realtime_prices:
             price = realtime_prices[ts_code]
             source = "realtime"
@@ -110,6 +92,116 @@ def get_positions(account_id: int, asof: Optional[date] = None,
             "price_source": source,
         })
     return rows
+
+
+@router.get("/{account_id}/positions", response_model=List[PositionRow])
+def get_positions(account_id: int, asof: Optional[date] = None,
+                  use_realtime: bool = True):
+    """【同步】账户当前持仓（含价格/收益率）
+
+    价格优先级：
+      - 不传 asof + use_realtime=true → 拉 spot 拿实时价（盘中是分时价，盘后是当日收盘）
+      - 传 asof 或者 use_realtime=false → 用 DB 收盘价（历史日期或离线场景）
+      - 实时价拉失败 → 自动回退 DB 收盘价
+      - 都没有 → 用持仓成本（避免 None）
+
+    ⚠️ use_realtime=true 时会调外网（AKShare），可能阻塞 5-30 秒。
+       前端建议改用 SSE 流式版本：GET /api/accounts/{id}/positions/stream
+
+    返回字段 `price_source`：realtime / close / cost
+    """
+    df = eng.get_positions(account_id)
+    if df.empty:
+        return []
+
+    use_date = asof or date.today()
+    want_realtime = use_realtime and asof is None
+    realtime_prices = _get_realtime_prices(df["ts_code"].tolist()) if want_realtime else {}
+    return _build_position_rows(df, realtime_prices, use_date)
+
+
+# -------------------- SSE 流式持仓 --------------------
+def _sse(obj: dict) -> str:
+    return f"data: {json.dumps(obj, ensure_ascii=False, default=str)}\n\n"
+
+
+def _positions_stream_gen(account_id: int, asof, use_realtime: bool):
+    """生成器：分阶段推送持仓查询进度
+
+    事件:
+      - {"progress": int, "msg": str}            进度
+      - {"progress": 100, "result": [...]}       最终持仓列表（同同步版 schema）
+      - {"error": str, "message": str}           失败
+    """
+    try:
+        yield _sse({"progress": 5, "msg": f"查账户 {account_id} 是否存在..."})
+        if eng.get_account(account_id) is None:
+            yield _sse({"error": "ACCOUNT_NOT_FOUND",
+                        "message": f"账户 {account_id} 不存在"})
+            return
+
+        yield _sse({"progress": 15, "msg": "查持仓明细（含股票名称）..."})
+        df = eng.get_positions(account_id)
+        if df.empty:
+            yield _sse({"progress": 100, "result": []})
+            return
+
+        use_date = asof or date.today()
+        want_realtime = use_realtime and asof is None
+
+        realtime_prices = {}
+        if want_realtime:
+            yield _sse({"progress": 30,
+                        "msg": f"拉 AKShare 实时价（{len(df)} 只股票，外网可能慢）..."})
+            realtime_prices = _get_realtime_prices(df["ts_code"].tolist())
+            hit = sum(1 for tc in df["ts_code"] if tc in realtime_prices)
+            yield _sse({"progress": 80,
+                        "msg": f"实时价拿到 {hit}/{len(df)} 只（其余降级 DB 收盘价）"})
+        else:
+            yield _sse({"progress": 50, "msg": "使用 DB 收盘价（未启用实时）..."})
+
+        yield _sse({"progress": 90, "msg": "计算收益率和市值..."})
+        rows = _build_position_rows(df, realtime_prices, use_date)
+
+        yield _sse({"progress": 100, "result": rows})
+
+    except Exception as e:
+        yield _sse({
+            "error": type(e).__name__,
+            "message": f"{type(e).__name__}: {e}",
+            "traceback": traceback.format_exc()[-500:],
+        })
+
+
+@router.get("/{account_id}/positions/stream")
+def get_positions_stream(account_id: int, asof: Optional[date] = None,
+                         use_realtime: bool = True):
+    """【SSE 流式】持仓查询 - 实时推送进度（外网调用专用）
+
+    跟同步版 /positions 返回同样的数据，但分 5 个阶段推送：
+      data: {"progress": 15, "msg": "查持仓明细..."}
+      data: {"progress": 30, "msg": "拉 AKShare 实时价..."}     ← 主要慢点
+      data: {"progress": 80, "msg": "实时价拿到 5/5 只..."}
+      data: {"progress": 90, "msg": "计算收益率..."}
+      data: {"progress": 100, "result": [...持仓数组...]}
+
+    命令行测试：
+      curl -N "http://localhost:8000/api/accounts/1/positions/stream"
+
+    前端 JS（参考 /api/rate/{code}/stream 用法相同）：
+      const ev = new EventSource('/api/accounts/1/positions/stream');
+      ev.onmessage = e => {
+        const d = JSON.parse(e.data);
+        if (d.result)  { showTable(d.result); ev.close(); }
+        if (d.error)   { showError(d.message); ev.close(); }
+        if (d.progress != null) updateBar(d.progress, d.msg);
+      };
+    """
+    return StreamingResponse(
+        _positions_stream_gen(account_id, asof, use_realtime),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
 
 
 @router.get("/{account_id}/trades", response_model=List[TradeRow])

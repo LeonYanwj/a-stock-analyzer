@@ -87,7 +87,9 @@ curl -X POST "http://localhost:8000/api/accounts?name=test-A&capital=50000&strat
 ```
 
 ### `GET /api/accounts/{id}/positions`
-**账户持仓**（含价 + 收益率 + 价格来源标记）
+**【同步】账户持仓**（含价 + 收益率 + 价格来源标记）
+
+⚠️ `use_realtime=true` 时调外网，可能 5-30 秒阻塞。**前端建议改用 `/positions/stream`**（SSE 流式）。
 
 参数：
 - `asof`（可选）：查某日的持仓估值，默认今天
@@ -124,6 +126,28 @@ curl "http://localhost:8000/api/accounts/1/positions?asof=2026-05-13"
   }
 ]
 ```
+
+### `GET /api/accounts/{id}/positions/stream` ⭐ 新
+**【SSE 流式】持仓查询**（外网调用专用，让前端能看到拉数据进度）
+
+跟同步版返回**完全相同**的数据，但分 5 个阶段推送：
+
+```
+data: {"progress": 5,   "msg": "查账户..."}
+data: {"progress": 15,  "msg": "查持仓明细..."}
+data: {"progress": 30,  "msg": "拉 AKShare 实时价（8 只，外网可能慢）..."}
+data: {"progress": 80,  "msg": "实时价拿到 8/8 只..."}
+data: {"progress": 90,  "msg": "计算收益率和市值..."}
+data: {"progress": 100, "result": [...持仓数组...]}
+```
+
+参数：跟同步版完全一致（`asof` / `use_realtime`）。
+
+```bash
+curl -N "http://localhost:8000/api/accounts/1/positions/stream"
+```
+
+前端 JS：跟 `/rate/{code}/stream` 用法完全一致（EventSource）。
 
 ### `GET /api/accounts/{id}/trades?limit=50`
 **成交记录**（默认最近 50 笔）
