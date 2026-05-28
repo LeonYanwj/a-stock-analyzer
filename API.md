@@ -3,6 +3,132 @@
 > **后端服务**: FastAPI 跑在 `8000` 端口
 > **启动命令**: `python -m uvicorn api.main:app --host 0.0.0.0 --port 8000`
 > **交互式文档**: 启动后访问 `http://localhost:8000/docs`（自动生成 Swagger UI）
+> **当前版本**: 0.2.0 | **总接口数**: 34
+
+---
+
+## 📑 目录
+
+- [接口设计规则](#-接口设计规则)
+- [三种调用模式](#-三种调用模式)
+- [接口速查表](#-接口速查表)
+- [通用约定 + 错误响应](#通用约定)
+- [系统接口](#-系统接口) `/` `/health`
+- [账户接口](#-账户接口模拟盘) `/api/accounts`
+- [选股接口](#-选股接口) `/api/screen`
+- [评级接口](#-评级接口) `/api/rate`
+- [回测接口](#-回测接口) `/api/backtest`
+- [股票数据接口](#-股票数据接口) `/api/stocks`
+- [任务管理接口](#️-任务管理接口异步任务专用) `/api/tasks`
+- [常见场景示例](#-常见场景示例前端组合用法)
+- [已知限制](#️-已知限制)
+- [部署 cheat sheet](#-部署-cheat-sheet)
+
+---
+
+## 🎯 接口设计规则
+
+| 场景 | 模式 | 例子 |
+|---|---|---|
+| **调外网**（AKShare / Tushare / 新浪 / 东财）| 必须 SSE 流式 | `/rate/{code}/stream`、`/positions/stream` |
+| **仅查 MySQL** | 同步阻塞（毫秒级，SSE 没意义）| `/stocks/{ts_code}`、`/accounts/{id}/trades` |
+| **分钟级长任务**（选股/回测/调仓）| 异步任务 + DB 归档 | `/screen/async` → 轮询 `/tasks/{id}` |
+
+新增接口务必遵守。原因：外网调用 5-40 秒不可控，浏览器同步阻塞会卡死，前端必须有进度可见。
+
+---
+
+## 🔌 三种调用模式
+
+### 模式 A：同步（GET → 立即返回）
+适用：DB 查询（毫秒级）
+
+```bash
+curl "http://localhost:8000/api/accounts/1/trades?limit=10"
+# → 直接返回 JSON 数组
+```
+
+### 模式 B：SSE 流式（一个连接持续推进度）
+适用：外网调用（5-40 秒）
+
+```bash
+curl -N "http://localhost:8000/api/rate/600519/stream"
+# data: {"progress":15,"msg":"拉历史日线..."}
+# data: {"progress":50,"msg":"拉名称..."}
+# data: {"progress":100,"result":{...}}
+```
+
+前端 JS：
+```javascript
+const ev = new EventSource('/api/rate/600519/stream');
+ev.onmessage = (e) => {
+  const d = JSON.parse(e.data);
+  if (d.result) { showResult(d.result); ev.close(); }
+  if (d.error)  { showError(d.message); ev.close(); }
+  if (d.progress != null) updateBar(d.progress, d.msg);
+};
+```
+
+### 模式 C：异步任务（POST 提交 → 轮询 GET）
+适用：分钟级长任务（选股/回测/调仓）
+
+```bash
+# 1. 提交
+curl -X POST "http://localhost:8000/api/screen/async?strategy=swing"
+# → {"task_id": "xxx"}
+
+# 2. 轮询（每 2-10 秒）
+curl "http://localhost:8000/api/tasks/xxx"
+# → {"status":"running","progress":30,"progress_msg":"拉股票池..."}
+
+# 3. status=done 后拿结果
+# → {"status":"done","result":{"picks":[...]}}
+```
+
+任务结果会**持久化到 DB**（`api_task_history` 表），重启 API 也能查 `/api/tasks/history`。
+
+---
+
+## 📋 接口速查表
+
+| Method | Path | 模式 | 用途 |
+|---|---|---|---|
+| GET | `/` | A | API 根路径概况 |
+| GET | `/health` | A | 健康检查 + DB 连通 |
+| GET | `/api/accounts` | A | 所有账户列表 |
+| POST | `/api/accounts` | A | 创建账户 |
+| GET | `/api/accounts/{id}` | A | 账户详情 |
+| GET | `/api/accounts/{id}/positions` | A* | 持仓（外网 → 建议用 stream）|
+| **GET** | **`/api/accounts/{id}/positions/stream`** | **B** | 持仓 SSE 流式 ⭐ |
+| GET | `/api/accounts/{id}/trades` | A | 成交记录 |
+| GET | `/api/accounts/{id}/equity` | A | 净值曲线 |
+| GET | `/api/accounts/{id}/report` | A | 单日复盘报告 |
+| POST | `/api/accounts/{id}/snapshot` | A | 保存权益快照 |
+| POST | `/api/accounts/{id}/stoploss` | A | 触发止损检查 |
+| POST | `/api/accounts/{id}/auto-rebalance/async` | C | 自动调仓任务 |
+| POST | `/api/accounts/{id}/daily-run/async` | C | 单账户每日流程 |
+| GET | `/api/screen` | A* | 选股同步（小数据量用）|
+| POST | `/api/screen/async` | C | 选股异步任务 |
+| GET | `/api/screen/strategies` | A | 策略列表 |
+| GET | `/api/screen/optimal-top-n` | A | 资金量 → 持仓数 |
+| GET | `/api/rate/{code}` | A* | 评级同步（CLI 用）|
+| **GET** | **`/api/rate/{code}/stream`** | **B** | 评级 SSE 流式 ⭐ |
+| GET | `/api/backtest` | A | 历史回测列表 |
+| GET | `/api/backtest/{run_id}` | A | 回测详情 |
+| POST | `/api/backtest/run/async` | C | 触发新回测 |
+| GET | `/api/stocks` | A | 股票列表/搜索 |
+| GET | `/api/stocks/{ts_code}` | A | 单股基础信息 |
+| GET | `/api/stocks/{ts_code}/daily` | A | 日线数据 |
+| GET | `/api/stocks/{ts_code}/valuation` | A | 估值历史 |
+| GET | `/api/stocks/{ts_code}/financial` | A | 财务历史 |
+| GET | `/api/tasks` | A | 内存任务列表 |
+| GET | `/api/tasks/history` | A | DB 归档任务历史 |
+| GET | `/api/tasks/{task_id}` | A | 单任务详情（内存 + DB fallback）|
+| DELETE | `/api/tasks/cleanup` | A | 清理内存任务表 |
+
+> `A*` = 同步但调外网（仍可用，但前端建议改用 SSE 流式版）
+
+---
 
 ## 通用约定
 
@@ -509,6 +635,96 @@ async function runScreenAsync() {
     }
   }
 }
+```
+
+---
+
+## 💡 常见场景示例（前端组合用法）
+
+### 场景 1：账户首页（账户列表 + 选中后看持仓）
+
+```javascript
+// 1. 加载账户下拉
+const accounts = await fetch('/api/accounts').then(r => r.json());
+
+// 2. 用户选了账户 1 → 同时拉账户元信息 + 流式拉持仓
+const acc = await fetch('/api/accounts/1').then(r => r.json());
+showHeader(`${acc.account_name} | 总权益 ${acc.current_equity}`);
+
+const ev = new EventSource('/api/accounts/1/positions/stream');
+ev.onmessage = e => {
+  const d = JSON.parse(e.data);
+  if (d.result) { renderPositions(d.result); ev.close(); }
+  else if (d.progress != null) updateLoading(d.progress, d.msg);
+};
+```
+
+### 场景 2：跑选股 → 拿结果 → 下单调仓
+
+```javascript
+// 1. 提交选股任务
+const { task_id } = await fetch('/api/screen/async?strategy=swing&capital=100000',
+                                 { method: 'POST' }).then(r => r.json());
+
+// 2. 轮询直到完成
+let result;
+while (true) {
+  await new Promise(r => setTimeout(r, 3000));
+  const t = await fetch(`/api/tasks/${task_id}`).then(r => r.json());
+  updateProgress(t.progress, t.progress_msg);
+  if (t.status === 'done')   { result = t.result; break; }
+  if (t.status === 'failed') { throw new Error(t.error); }
+}
+
+// 3. 用户确认 picks 后触发调仓
+const { task_id: rebalId } = await fetch(
+  '/api/accounts/1/auto-rebalance/async',
+  { method: 'POST' }
+).then(r => r.json());
+// 再次轮询 rebalId ...
+```
+
+### 场景 3：单股评级页面（含实时进度）
+
+```javascript
+const code = '600519';
+const ev = new EventSource(`/api/rate/${code}/stream?strategy=swing`);
+ev.onmessage = (e) => {
+  const d = JSON.parse(e.data);
+  if (d.error) {
+    showError(d.message);          // STOCK_DATA_EMPTY 等
+    ev.close();
+  } else if (d.result) {
+    renderRating(d.result);         // 5 维度评级表格
+    ev.close();
+  } else {
+    updateProgressBar(d.progress);   // "拉历史日线..." "拉财务..."
+    updateProgressLabel(d.msg);
+  }
+};
+```
+
+### 场景 4：回测历史复盘
+
+```javascript
+// 1. 列出最近回测
+const runs = await fetch('/api/backtest?strategy=swing&limit=20').then(r => r.json());
+
+// 2. 用户点开某次回测
+const detail = await fetch(`/api/backtest/${runs[0].run_id}`).then(r => r.json());
+drawEquityCurve(detail.equity);        // 净值曲线
+showICTable(detail.ic_summary);         // 因子 IC
+showPositions(detail.positions);        // 每期持仓 Top
+```
+
+### 场景 5：任务历史复盘（看上次怎么跑的）
+
+```javascript
+// DB 归档查所有 backtest 任务（重启不丢）
+const history = await fetch('/api/tasks/history?name=backtest&status=done&limit=10')
+                .then(r => r.json());
+// 看 params 字段就知道当时是什么参数跑的
+history.forEach(t => console.log(t.task_id, t.params, t.duration_seconds));
 ```
 
 ---
