@@ -7,17 +7,30 @@
     http://localhost:8000/docs        交互式 Swagger
     http://localhost:8000/redoc       ReDoc
 """
+from contextlib import asynccontextmanager
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from api import errors as api_errors
-from api.routes import accounts, screen, rate, backtest, stocks, tasks
+from api import scheduler as sched
+from api.routes import accounts, screen, rate, backtest, stocks, tasks, scheduler
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # 进程启动：拉起定时任务（每交易日傍晚更新行情 + daily_runner）
+    sched.start_scheduler()
+    yield
+    # 进程关闭：优雅停掉调度器
+    sched.shutdown_scheduler()
 
 
 app = FastAPI(
     title="A 股量化系统 API",
     description="模拟盘、选股、评级、回测、数据查询",
     version="0.2.0",
+    lifespan=lifespan,
 )
 
 # CORS：允许所有来源（初期调试用，生产环境收紧）
@@ -40,6 +53,7 @@ app.include_router(rate.router)
 app.include_router(backtest.router)
 app.include_router(stocks.router)
 app.include_router(tasks.router)
+app.include_router(scheduler.router)
 
 
 @app.get("/")
@@ -55,6 +69,7 @@ def root():
             "backtest":  "/api/backtest (含 POST /run/async 触发回测)",
             "stocks":    "/api/stocks",
             "tasks":     "/api/tasks (异步任务查询)",
+            "scheduler": "/api/scheduler/status (定时任务状态) 或 POST /run-now 手动触发",
         }
     }
 

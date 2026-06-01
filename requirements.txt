@@ -7,3 +7,4 @@ mplfinance
 pymysql
 fastapi
 uvicorn[standard]
+apscheduler

@@ -125,6 +125,35 @@ DIM_PROFILES = {
 }
 
 
+# -------------------------- 调仓模式 --------------------------
+# signal   = 信号驱动·增量换仓：每个交易日重算打分，持仓跌出宽限带就换，
+#            强势保留，空仓补新晋强势股。适合短线/波段。
+# periodic = 周期驱动：到调仓周期才整体清仓重选。适合趋势/长线（少折腾、低换手）。
+REBAL_MODE = {
+    "short_term":   "signal",    # 短线 1-3 天：必须靠信号及时换
+    "swing":        "signal",    # 波段 1-4 周：也用信号，宽限带更宽（见 keep_buffer）
+    "trend":        "periodic",  # 趋势 1-3 月：周期调仓即可，避免追涨杀跌
+    "ic_optimized": "periodic",
+}
+
+# 各策略信号驱动时的「保留宽限带」倍数：持仓股排名 ≤ top_n*buffer 就继续持有。
+# 倍数越大越"惰性"（换手越低）。短线小、波段大。
+KEEP_BUFFER = {
+    "short_term": 1.3,
+    "swing":      1.8,
+}
+
+
+def get_rebal_mode(strategy: str) -> str:
+    """返回调仓模式：'signal' 或 'periodic'；未知策略默认 periodic（保守）"""
+    return REBAL_MODE.get(strategy, "periodic")
+
+
+def get_keep_buffer(strategy: str) -> float:
+    """信号驱动时的保留宽限带倍数；默认 1.5"""
+    return KEEP_BUFFER.get(strategy, 1.5)
+
+
 def get_factor_weights(strategy: str) -> dict:
     """获取选股因子权重；未知策略名 fallback 到 swing"""
     return dict(FACTOR_PROFILES.get(strategy, FACTOR_PROFILES["swing"]))

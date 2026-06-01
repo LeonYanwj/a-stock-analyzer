@@ -60,32 +60,51 @@ def run_one_account(account: dict, trade_date: date, limit: int = 500,
             for d in r["details"]:
                 print(f"    {d['ts_code']}  收益 {d['ret']*100:+.2f}%  价 {d['price']:.3f}")
 
-    # 2. 是否调仓日
-    is_rebal = eng.is_rebal_day(aid, trade_date)
-    print(f"\n[2] 调仓日判断: {'是' if is_rebal else '否（继续持有）'}")
-    if is_rebal:
+    # 2. 调仓：信号驱动（短线/波段，每日增量换仓）或周期驱动（趋势/长线）
+    from strategies import get_rebal_mode
+    mode = get_rebal_mode(strategy)
+
+    if mode == "signal":
+        print(f"\n[2] 调仓模式: 信号驱动（每日增量换仓）")
         if dry_run:
-            print(f"  [DRY] 会跑 {strategy} 选股 + 清仓 + 等权买入")
+            print(f"  [DRY] 会重算 {strategy} 打分并增量换仓（卖跌出榜的 / 买新晋强势）")
         else:
-            print(f"  跑 {strategy} 选股...")
-            from screen import screen_market
-            picks_df = screen_market(
-                strategy=strategy,
-                capital=float(account["current_equity"]),
-                limit=limit,
-                verbose=False,
-            )
-            if picks_df.empty:
-                print("  [warn] 选股为空，跳过调仓")
+            r = eng.rebalance_by_signal(aid, trade_date, limit=limit)
+            if r.get("error"):
+                print(f"  [warn] 换仓跳过: {r['error']}")
             else:
-                picks = picks_df.index.tolist()
-                print(f"  选出 {len(picks)} 只")
-                sold = eng.sell_all(aid, trade_date, reason="REBALANCE")
-                print(f"  卖出 {sold['n_sold']} 只, 收入 {sold['total_revenue']:,.2f}")
-                bought = eng.buy_equal_weight(aid, picks, trade_date, reason="REBALANCE")
-                print(f"  买入 {bought['n_bought']} 只, 支出 {bought['total_spent']:,.2f}")
-                if bought["skipped"]:
-                    print(f"  跳过 {len(bought['skipped'])} 只（停牌/资金不够）")
+                print(f"  保留 {r['kept']} 只 / 卖出 {r['sold']} 只 / 买入 {r['bought']} 只"
+                      f"  (目标 {r['top_n']} 只, 宽限带前 {r['keep_depth']})")
+                if r["sell_detail"]:
+                    print(f"    卖(转弱): {', '.join(r['sell_detail'])}")
+                if r["buy_detail"]:
+                    print(f"    买(新晋): {', '.join(r['buy_detail'])}")
+    else:
+        is_rebal = eng.is_rebal_day(aid, trade_date)
+        print(f"\n[2] 调仓日判断: {'是' if is_rebal else '否（继续持有）'}")
+        if is_rebal:
+            if dry_run:
+                print(f"  [DRY] 会跑 {strategy} 选股 + 清仓 + 等权买入")
+            else:
+                print(f"  跑 {strategy} 选股...")
+                from screen import screen_market
+                picks_df = screen_market(
+                    strategy=strategy,
+                    capital=float(account["current_equity"]),
+                    limit=limit,
+                    verbose=False,
+                )
+                if picks_df.empty:
+                    print("  [warn] 选股为空，跳过调仓")
+                else:
+                    picks = picks_df.index.tolist()
+                    print(f"  选出 {len(picks)} 只")
+                    sold = eng.sell_all(aid, trade_date, reason="REBALANCE")
+                    print(f"  卖出 {sold['n_sold']} 只, 收入 {sold['total_revenue']:,.2f}")
+                    bought = eng.buy_equal_weight(aid, picks, trade_date, reason="REBALANCE")
+                    print(f"  买入 {bought['n_bought']} 只, 支出 {bought['total_spent']:,.2f}")
+                    if bought["skipped"]:
+                        print(f"  跳过 {len(bought['skipped'])} 只（停牌/资金不够）")
 
     # 3. 权益快照
     print("\n[3] 权益快照")
@@ -99,6 +118,46 @@ def run_one_account(account: dict, trade_date: date, limit: int = 500,
     # 4. 复盘报告
     print("\n[4] 复盘报告:")
     print(eng.daily_report(aid, trade_date))
+
+
+def run_all(trade_date=None, account_id: int = None, limit: int = 500,
+            dry_run: bool = False):
+    """可编程入口：遍历活跃账户跑完整日流程（供调度器 / API / 命令行复用）
+
+    Args:
+        trade_date: date 对象、'YYYYMMDD'/'YYYY-MM-DD' 字符串，或 None=今天
+        account_id: 只跑某个账户；None 则遍历所有活跃账户
+    """
+    if trade_date is None:
+        trade_date = date.today()
+    elif isinstance(trade_date, str):
+        s = trade_date.replace("-", "")
+        trade_date = date(int(s[:4]), int(s[4:6]), int(s[6:8]))
+
+    if account_id:
+        acc = eng.get_account(account_id)
+        if acc is None:
+            print(f"账户 {account_id} 不存在")
+            return
+        accounts = [acc]
+    else:
+        df = eng.list_accounts()
+        df = df[df["is_active"] == 1]
+        accounts = df.to_dict("records")
+
+    if not accounts:
+        print("没有活跃账户")
+        return
+    print(f"\n共 {len(accounts)} 个活跃账户")
+
+    for acc in accounts:
+        # 补全 account 完整字段（get_account 含 rebal_weeks）
+        full = eng.get_account(acc["account_id"]) if "rebal_weeks" not in acc else acc
+        run_one_account(full, trade_date, limit=limit, dry_run=dry_run)
+
+    print("\n" + "=" * 60)
+    print("  Daily Runner 完成")
+    print("=" * 60)
 
 
 def main():
@@ -125,33 +184,9 @@ def main():
           + ("   [DRY-RUN]" if args.dry_run else ""))
     print("=" * 60)
 
-    # 选账户
-    if args.account:
-        acc = eng.get_account(args.account)
-        if acc is None:
-            print(f"账户 {args.account} 不存在")
-            return
-        accounts = [acc]
-    else:
-        df = eng.list_accounts()
-        df = df[df["is_active"] == 1]
-        accounts = df.to_dict("records")
-        # 补 strategy_name 等（list_accounts 已返回）
-
-    if not accounts:
-        print("没有活跃账户")
-        return
-    print(f"\n共 {len(accounts)} 个活跃账户")
-
-    # 逐个跑
-    for acc in accounts:
-        # 补全 account 完整字段（get_account 含 rebal_weeks）
-        full = eng.get_account(acc["account_id"]) if "rebal_weeks" not in acc else acc
-        run_one_account(full, trade_date, limit=args.limit, dry_run=args.dry_run)
-
-    print("\n" + "=" * 60)
-    print("  Daily Runner 完成")
-    print("=" * 60)
+    # 选账户 + 遍历（复用 run_all）
+    run_all(trade_date=trade_date, account_id=args.account,
+            limit=args.limit, dry_run=args.dry_run)
 
 
 if __name__ == "__main__":

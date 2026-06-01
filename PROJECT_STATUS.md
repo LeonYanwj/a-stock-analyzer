@@ -41,15 +41,16 @@ Tier 4: 实盘 / ML     → 接券商 API、机器学习增强
 |------|------|:----:|
 | 1 | 量化研究平台 | ██████████ 100% |
 | 2 | 数据基础设施 | ██████████ 100% |
-| 3 | 模拟盘 | █████████░ 95% |
+| 3 | 模拟盘 | █████████░ 98% |
 | 4 | 实盘 / ML / 高级 | ░░░░░░░░░░ 0% |
 | 5 | **REST API（前后端分离）** | **██████████ 100%** |
 | | **整体** | **█████████░ 90%** |
 
-**最新动态**：FastAPI 后端完成！20+ 接口覆盖账户/选股/评级/回测/股票数据。
-端到端测试全部通过，可直接对接任意前端框架。
-启动: `uvicorn api.main:app --host 0.0.0.0 --port 8000`
-文档: `/docs` (Swagger UI)
+**最新动态**：
+- **自动定时调度上线**：APScheduler 集成进 FastAPI，每交易日 18:00（北京时间）自动「更新行情 → daily_runner」，随 uvicorn 启动即生效，无需系统 cron。查询/手动触发：`/api/scheduler/status`、`POST /api/scheduler/run-now`。
+- **调仓机制升级**：短线/波段改为**信号驱动·增量换仓**（每日按打分决定换不换，持仓跌出宽限带才卖，强势保留以降换手），趋势保持周期调仓。
+- FastAPI 后端：20+ 接口覆盖账户/选股/评级/回测/股票数据，端到端测试通过。
+- 启动: `uvicorn api.main:app --host 0.0.0.0 --port 8000`；文档: `/docs` (Swagger UI)
 
 ---
 
@@ -62,7 +63,7 @@ Tier 4: 实盘 / ML     → 接券商 API、机器学习增强
 | **数据层** | `data/fetcher.py` | AKShare 多源数据获取（新浪/东财/同花顺/巨潮）|
 | | `data/db.py` | MySQL 访问层（连接 + UPSERT + 各表读写）|
 | **策略/因子** | `factors/compute.py` | 14 个因子计算 |
-| | `strategies.py` | 3 个策略 profile + 资金量自适应持仓数 |
+| | `strategies.py` | 3 个策略 profile + 调仓模式(信号/周期) + 资金量自适应持仓数 |
 | | `selector.py` | 横截面打分排序 |
 | | `news_scorer.py` | 关键词消息面评分 |
 | | `pattern_recognizer.py` | 4 个 K 线形态识别 |
@@ -76,7 +77,8 @@ Tier 4: 实盘 / ML     → 接券商 API、机器学习增强
 | | `query_backtest.py` | 历史回测查询工具 |
 | | `paper_engine.py` | **模拟盘核心引擎（新）** |
 | | `paper.py` | 模拟盘 CLI |
-| | `daily_runner.py` | **每日运行器（cron 入口）** |
+| | `daily_runner.py` | **每日运行器**（信号/周期调仓分流；`run_all` 供调度&CLI 共用）|
+| | `api/scheduler.py` | **APScheduler 定时任务**（每交易日 18:00 自动更新行情 + daily_runner）|
 | **回测/验证** | `backtest_simple.py` | 基础回测（IC + 止损 + DB 写入）|
 | | `backtest_rolling.py` | 动态滚动调权重 |
 | | `walk_forward.py` | 样本外验证 |
@@ -183,11 +185,15 @@ python paper.py positions --account 1
 python paper.py trades --account 1
 python paper.py report --account 1
 
-# ⭐ 每日定时跑（cron 入口）
+# ⭐ 每日运行器（CLI；正常由 APScheduler 自动跑，无需手动）
 python daily_runner.py                        # 跑今天，所有活跃账户
 python daily_runner.py --date 20260513        # 历史复盘
 python daily_runner.py --account 1            # 只跑某个账户
 python daily_runner.py --dry-run              # 预览不执行
+
+# ⭐ 自动调度（APScheduler，随 uvicorn 启动，每交易日 18:00 北京时间自动跑）
+curl http://localhost:8000/api/scheduler/status            # 查下次执行时间 / 上次结果
+curl -X POST http://localhost:8000/api/scheduler/run-now   # 手动立即触发一次（补数据/验证）
 ```
 
 ### 数据初始化（一次性）
@@ -216,8 +222,10 @@ python init_data.py --limit 2000              # 全市场 stock_basic + 估值
 - [x] ~~每日复盘报告~~ ✅ daily_report
 - [x] ~~自动调仓（嵌入 screen 选股）~~ ✅ paper.py auto-rebalance
 - [x] ~~多策略账户并行~~ ✅ 已建 short/swing/trend 三账户
-- [x] ~~每日 cron 入口~~ ✅ daily_runner.py（待真机部署 cron）
-- [ ] 真机部署 cron + 跑 1-3 个月积累数据
+- [x] ~~每日 cron 入口~~ ✅ daily_runner.py（`run_all` 可编程入口）
+- [x] ~~自动定时调度~~ ✅ APScheduler 集成进 FastAPI（每交易日 18:00 自动「更新行情 + daily_runner」，随 uvicorn 启动）
+- [x] ~~信号驱动调仓~~ ✅ 短线/波段每日增量换仓（跌出宽限带才换，强势保留），趋势保持周期
+- [ ] 跑 1-3 个月积累真实数据（需 uvicorn 进程常驻）
 - [ ] 修复 pandas SQLAlchemy 警告（用 SQLAlchemy engine 替代 pymysql connection）
 
 ### 长期（Phase 3/4，1-2 周以上）
@@ -240,6 +248,8 @@ python init_data.py --limit 2000              # 全市场 stock_basic + 估值
 7. **持仓数设计**：不硬编码档位，按 `单股仓位约束` 公式算区间
 8. **东财反爬**：spot/资金流接口被封，但单股新闻/公告/研报能通；用新浪 spot 兜底
 9. **MySQL UPSERT**：pymysql `with conn` 默认 ROLLBACK，已强制 autocommit=True
+10. **调仓机制（信号 vs 周期）**：短线/波段为「信号驱动·增量换仓」——每日重算打分，持仓跌出「保留宽限带」(top_n×1.3~1.8) 才卖、空仓补新晋强势股，强势持仓不动以降换手；趋势保持周期调仓。配置见 `strategies.py` 的 `REBAL_MODE` / `KEEP_BUFFER`。解决了短线「持有 1-3 天却 7 天才调仓」的矛盾。
+11. **定时调度用 APScheduler 而非系统 cron**：BackgroundScheduler 集成进 FastAPI lifespan，随 uvicorn 启动，每交易日 18:00 串行「更新行情 → daily_runner」。优点：代码即配置、跨平台一致；前提：进程需常驻，多 worker 部署需防重复执行（已设 max_instances=1）。
 
 ---
 

@@ -111,6 +111,14 @@ def main():
     panel_all["trade_date"] = pd.to_datetime(panel_all["trade_date"])
     print(f"  面板: {len(panel_all)} 行")
 
+    # 注入基本面（含 ROE 因子的轻微未来函数偏差，仅用于初步验证）
+    fin_df = fetcher.get_financial_latest_all()
+    if not fin_df.empty:
+        fin_cols = [c for c in ["ts_code", "roe", "gross_margin", "net_margin",
+                                "debt_ratio"] if c in fin_df.columns]
+        panel_all = panel_all.merge(fin_df[fin_cols], on="ts_code", how="left")
+        print(f"  注入基本面: {len(fin_df)} 只覆盖（注：未做 PIT 对齐，有轻微未来偏差）")
+
     trade_dates = fetcher.get_trade_dates(fetch_start, fetch_end)
     old_weights = _filter_tech_weights(get_factor_weights(args.strategy))
 

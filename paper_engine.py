@@ -384,6 +384,96 @@ def is_rebal_day(account_id: int, trade_date) -> bool:
     return (trade_date - last).days >= rebal_weeks * 7
 
 
+# -------------------- 信号驱动·增量换仓 --------------------
+def rebalance_by_signal(account_id: int, trade_date, top_n_target: int = None,
+                        limit: int = 500, keep_buffer: float = None) -> dict:
+    """信号驱动·增量换仓（短线/波段策略每个交易日跑）
+
+    与周期调仓（清仓重买）不同，这里只动该动的：
+      1. 重算全市场因子打分，取前 top_n*keep_buffer 只为「保留宽限带」
+      2. 持仓股仍在宽限带 → 继续持有（不动，省手续费、保住强势趋势）
+      3. 持仓股跌出宽限带 → 视为转弱信号，卖出
+      4. 空出的仓位 → 从当日最强 top_n 里补入当前没持有的新晋强势股
+
+    宽限带 > top_n 是为了避免持仓股在第 N 名上下抖动导致来回买卖。
+
+    Returns:
+        {held_before, kept, sold, bought, top_n, keep_depth,
+         sell_detail:[...], buy_detail:[...]}  或 {error:...}
+    """
+    from screen import screen_market
+    from strategies import calc_optimal_top_n, get_keep_buffer
+
+    trade_date = _norm_date(trade_date)
+    acc = get_account(account_id)
+    if acc is None:
+        return {"error": "account_not_found"}
+
+    strategy = acc["strategy_name"]
+    equity = float(acc["current_equity"])
+    if top_n_target is None:
+        top_n_target = calc_optimal_top_n(equity)
+    if keep_buffer is None:
+        keep_buffer = get_keep_buffer(strategy)
+
+    # 拉到「宽限带」深度的排名（已按分降序）
+    keep_depth = max(top_n_target + 1, int(round(top_n_target * keep_buffer)))
+    picks_df = screen_market(strategy=strategy, capital=equity,
+                             top_n_arg=keep_depth, limit=limit, verbose=False)
+    if picks_df.empty:
+        return {"error": "screen_empty", "sold": 0, "bought": 0, "kept": 0}
+
+    ranked = picks_df.index.tolist()
+    buy_pool = ranked[:top_n_target]     # 最强 N 只：买入候选
+    keep_set = set(ranked)               # 宽限带：保留判断
+
+    pos = get_positions(account_id)
+    held = pos["ts_code"].tolist() if not pos.empty else []
+
+    # 1. 卖出跌出宽限带的持仓（转弱信号）
+    sold, sell_detail = 0, []
+    if not pos.empty:
+        for _, p in pos.iterrows():
+            tc = p["ts_code"]
+            if tc in keep_set:
+                continue
+            price = get_close_price(tc, trade_date)
+            if price is None:
+                continue
+            execute_sell(account_id, tc, int(p["qty"]), price, trade_date,
+                         reason="SIGNAL")
+            sold += 1
+            sell_detail.append(tc)
+
+    # 2. 保留的持仓 + 还空几个仓位
+    held_after = [tc for tc in held if tc in keep_set]
+    slots = max(0, top_n_target - len(held_after))
+
+    # 3. 买入新晋强势股补满空位（等权，单股目标 = 总权益/top_n，受现金约束）
+    to_buy = [tc for tc in buy_pool if tc not in held_after][:slots]
+    bought, buy_detail = 0, []
+    if to_buy:
+        cash = float(get_account(account_id)["current_cash"])
+        per_pos = min(equity / top_n_target, cash / len(to_buy))
+        for tc in to_buy:
+            price = get_close_price(tc, trade_date)
+            if price is None:
+                continue
+            qty = int(per_pos / (price * (1 + SLIPPAGE_RATE)) / 100) * 100
+            if qty < 100:
+                continue
+            execute_buy(account_id, tc, qty, price, trade_date, reason="SIGNAL")
+            bought += 1
+            buy_detail.append(tc)
+
+    return {
+        "held_before": len(held), "kept": len(held_after),
+        "sold": sold, "bought": bought,
+        "top_n": top_n_target, "keep_depth": keep_depth,
+        "sell_detail": sell_detail, "buy_detail": buy_detail,
+    }
+
+
 # -------------------- 止损 --------------------
 def check_stoploss(account_id: int, trade_date) -> dict:
     """检查持仓收益是否触发止损"""
