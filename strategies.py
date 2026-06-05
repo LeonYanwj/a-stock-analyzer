@@ -154,6 +154,18 @@ def get_keep_buffer(strategy: str) -> float:
     return KEEP_BUFFER.get(strategy, 1.5)
 
 
+# 盘中实时监控：策略 -> 监控间隔(分钟)。不在表里的策略 = 不做盘中监控。
+# 盘中只评估持仓(止损/跌破MA5 就卖)，买入一律放收盘。
+INTRADAY_MONITOR = {
+    "short_term": 10,   # 短线每 10 分钟盯持仓
+}
+
+
+def get_intraday_minutes(strategy: str):
+    """该策略盘中监控间隔(分钟)；不需要盘中监控则返回 None"""
+    return INTRADAY_MONITOR.get(strategy)
+
+
 def get_factor_weights(strategy: str) -> dict:
     """获取选股因子权重；未知策略名 fallback 到 swing"""
     return dict(FACTOR_PROFILES.get(strategy, FACTOR_PROFILES["swing"]))

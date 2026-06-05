@@ -130,6 +130,46 @@ def get_close_price(ts_code: str, trade_date: date) -> float:
         return float(row[0]) if row and row[0] else None
 
 
+def get_ma(ts_code: str, trade_date, n: int = 5) -> float:
+    """N 日均线：trade_date 之前最近 N 个交易日收盘均值。
+
+    盘中调用时今日尚未收盘，故只用已确定的历史收盘价（trade_date<当天）。
+    不足 N 条返回 None（不足以判断趋势，宁可不触发）。
+    """
+    trade_date = _norm_date(trade_date)
+    with get_conn() as conn:
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT close FROM market_daily WHERE ts_code=%s AND adjust='qfq' "
+            "AND trade_date<%s ORDER BY trade_date DESC LIMIT %s",
+            (ts_code, trade_date, n))
+        rows = cur.fetchall()
+        cur.close()
+    closes = [float(r[0]) for r in rows if r and r[0]]
+    if len(closes) < n:
+        return None
+    return sum(closes) / len(closes)
+
+
+def get_realtime_prices(ts_codes: list) -> dict:
+    """拉一次全市场 spot 快照，取出指定股票的实时价。
+
+    盘中=分时现价，盘后=当日收盘。失败返回空 dict（调用方自行降级/跳过）。
+    """
+    if not ts_codes:
+        return {}
+    try:
+        from data.fetcher import DataFetcher
+        spot = DataFetcher().get_market_snapshot()
+        if spot.empty:
+            return {}
+        sub = spot[spot["ts_code"].isin(ts_codes)][["ts_code", "close"]]
+        return {r["ts_code"]: float(r["close"]) for _, r in sub.iterrows()
+                if r["close"] and float(r["close"]) > 0}
+    except Exception:
+        return {}
+
+
 # -------------------- 持仓 --------------------
 def get_positions(account_id: int) -> pd.DataFrame:
     """持仓明细。JOIN market_stock_basic 带出股票名称。"""
@@ -386,7 +426,8 @@ def is_rebal_day(account_id: int, trade_date) -> bool:
 
 # -------------------- 信号驱动·增量换仓 --------------------
 def rebalance_by_signal(account_id: int, trade_date, top_n_target: int = None,
-                        limit: int = 500, keep_buffer: float = None) -> dict:
+                        limit: int = 500, keep_buffer: float = None,
+                        min_score: float = 0.0) -> dict:
     """信号驱动·增量换仓（短线/波段策略每个交易日跑）
 
     与周期调仓（清仓重买）不同，这里只动该动的：
@@ -450,7 +491,16 @@ def rebalance_by_signal(account_id: int, trade_date, top_n_target: int = None,
     slots = max(0, top_n_target - len(held_after))
 
     # 3. 买入新晋强势股补满空位（等权，单股目标 = 总权益/top_n，受现金约束）
-    to_buy = [tc for tc in buy_pool if tc not in held_after][:slots]
+    #    质量门槛：打分须 > min_score(默认0，即强于横截面均值)才买，否则宁可空仓
+    scores = picks_df["score"] if "score" in picks_df.columns else None
+
+    def _good(tc):
+        if scores is None:
+            return True
+        s = scores.get(tc)
+        return s is not None and pd.notna(s) and s > min_score
+
+    to_buy = [tc for tc in buy_pool if tc not in held_after and _good(tc)][:slots]
     bought, buy_detail = 0, []
     if to_buy:
         cash = float(get_account(account_id)["current_cash"])
@@ -492,6 +542,49 @@ def check_stoploss(account_id: int, trade_date) -> dict:
                         price, trade_date, reason="STOPLOSS")
             triggered.append({"ts_code": p["ts_code"], "ret": ret, "price": price})
     return {"triggered": len(triggered), "details": triggered}
+
+
+# -------------------- 盘中实时监控（短线） --------------------
+def intraday_monitor(account_id: int, trade_date=None) -> dict:
+    """盘中实时监控持仓（短线每 N 分钟跑一次）。
+
+    只评估持仓、只卖不买（买入放收盘扫描）：
+      - 实时价跌破成本 -8%        → 清仓（硬止损）
+      - 实时价跌破 5 日均线(MA5)   → 清仓（短线趋势走坏）
+    拿不到某股实时价则跳过该股（不在缺价时误操作）。
+
+    Returns: {checked, sold, detail:[{ts_code, reason, price, ret}], no_price}
+    """
+    trade_date = _norm_date(trade_date or date.today())
+    positions = get_positions(account_id)
+    if positions.empty:
+        return {"checked": 0, "sold": 0, "detail": [], "no_price": 0}
+
+    rt = get_realtime_prices(positions["ts_code"].tolist())
+    sold, no_price = [], 0
+    for _, p in positions.iterrows():
+        tc = p["ts_code"]
+        price = rt.get(tc)
+        if price is None:
+            no_price += 1
+            continue
+        avg_cost = float(p["avg_cost"])
+        ret = price / avg_cost - 1
+        # 1. 硬止损
+        if ret <= STOPLOSS:
+            execute_sell(account_id, tc, int(p["qty"]), price, trade_date, reason="STOPLOSS")
+            sold.append({"ts_code": tc, "reason": "STOPLOSS",
+                         "price": price, "ret": round(ret, 4)})
+            continue
+        # 2. 跌破 MA5（短线趋势走坏）
+        ma5 = get_ma(tc, trade_date, 5)
+        if ma5 is not None and price < ma5:
+            execute_sell(account_id, tc, int(p["qty"]), price, trade_date, reason="MA5")
+            sold.append({"ts_code": tc, "reason": "MA5",
+                         "price": price, "ret": round(ret, 4)})
+
+    return {"checked": len(positions), "sold": len(sold),
+            "detail": sold, "no_price": no_price}
 
 
 # -------------------- 权益快照 --------------------

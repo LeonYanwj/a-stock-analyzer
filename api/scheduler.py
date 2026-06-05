@@ -12,7 +12,7 @@
 时区固定 Asia/Shanghai，cron 看的是北京时间。
 """
 import traceback
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, time, timedelta
 
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
@@ -32,6 +32,14 @@ _last_run = {
     "finished_at": None,
     "quotes_updated": 0,
     "detail": "",
+}
+
+# 盘中监控最近一次状态
+_last_intraday = {
+    "status": "never",   # never / ok
+    "time": None,
+    "sold": 0,
+    "detail": [],
 }
 
 
@@ -97,6 +105,56 @@ def run_daily_job(trade_date=None):
         traceback.print_exc()
 
 
+def is_trade_day(d) -> bool:
+    """d 是否 A 股交易日。查不到时保守返回 False（不确定时不操作）。"""
+    try:
+        from data.fetcher import DataFetcher
+        return len(DataFetcher().get_trade_dates(d, d)) > 0
+    except Exception:
+        return False
+
+
+def is_trading_hours(now) -> bool:
+    """now 是否在 A 股交易时段（9:30-11:30 或 13:00-15:00）"""
+    t = now.time()
+    return (time(9, 30) <= t <= time(11, 30)) or (time(13, 0) <= t <= time(15, 0))
+
+
+def run_intraday_monitor():
+    """盘中 job：交易日 & 交易时段内，对需盘中监控的策略账户(短线)跑 intraday_monitor。
+
+    cron 触发得宽(9-15 每10分钟)，这里精确校验时段；非交易日/非时段直接跳过。
+    只评估持仓、只卖不买（买入放收盘）。
+    """
+    from strategies import get_intraday_minutes
+    now = datetime.now()
+    if not is_trade_day(now.date()) or not is_trading_hours(now):
+        return
+    try:
+        accts = eng.list_accounts(status="active")
+    except Exception:
+        traceback.print_exc()
+        return
+    if accts.empty:
+        return
+
+    total_sold, detail = 0, []
+    for _, a in accts.iterrows():
+        if get_intraday_minutes(a["strategy_name"]) is None:
+            continue   # 该策略不做盘中监控（如波段/趋势）
+        try:
+            r = eng.intraday_monitor(int(a["account_id"]), now.date())
+            total_sold += r["sold"]
+            if r["sold"]:
+                detail.append({"account_id": int(a["account_id"]),
+                               "account": a["account_name"], "items": r["detail"]})
+        except Exception:
+            traceback.print_exc()
+
+    _last_intraday.update(status="ok", time=now.isoformat(),
+                          sold=total_sold, detail=detail)
+
+
 def trigger_now():
     """手动立即触发一次（后台线程跑，立即返回）。供 API 验证用。"""
     scheduler.add_job(run_daily_job, id="manual_run", replace_existing=True,
@@ -107,11 +165,19 @@ def get_status() -> dict:
     """返回最近一次运行状态 + 下次自动执行时间。"""
     job = scheduler.get_job("daily_job")
     next_run = job.next_run_time.isoformat() if job and job.next_run_time else None
+    intraday = scheduler.get_job("intraday_job")
+    intraday_next = (intraday.next_run_time.isoformat()
+                     if intraday and intraday.next_run_time else None)
     return {
         "scheduler_running": scheduler.running,
         "next_run_time": next_run,
         "cron": f"mon-fri {DAILY_HOUR:02d}:{DAILY_MINUTE:02d} (Asia/Shanghai)",
         "last_run": dict(_last_run),
+        "intraday": {
+            "next_run_time": intraday_next,
+            "cron": "mon-fri 9:30-11:30 & 13:00-15:00 每10分钟 (Asia/Shanghai)",
+            "last_run": dict(_last_intraday),
+        },
     }
 
 
@@ -127,6 +193,15 @@ def start_scheduler():
         max_instances=1,        # 不允许重叠运行（上一轮没跑完就跳过本轮）
         coalesce=True,          # 错过多次只补跑一次
         misfire_grace_time=3600,  # 进程晚启动 1 小时内仍补跑
+    )
+    # 盘中监控：交易日 9-15 点每 10 分钟触发，job 内部精确校验交易时段
+    scheduler.add_job(
+        run_intraday_monitor,
+        CronTrigger(day_of_week="mon-fri", hour="9-15", minute="*/10"),
+        id="intraday_job",
+        name="盘中每10分钟监控短线持仓(止损/MA5)",
+        max_instances=1, coalesce=True,
+        misfire_grace_time=120,   # 盘中时效强，过期 2 分钟就不补
     )
     scheduler.start()
 
