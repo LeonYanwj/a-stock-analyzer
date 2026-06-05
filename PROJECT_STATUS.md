@@ -47,6 +47,8 @@ Tier 4: 实盘 / ML     → 接券商 API、机器学习增强
 | | **整体** | **█████████░ 90%** |
 
 **最新动态**：
+- **实盘持仓分析模块上线**（与模拟盘 paper_* 完全隔离）：前端录入真实持仓 → 每交易日 **18:30 自动**对每只持仓做全方位分析（5 维评级 + 当天新闻/公告/研报原文 + 价格/涨跌/浮盈）→ **邮件推送**。接口 `/api/holdings`(CRUD)、`/api/notify/config`(SMTP)，手动触发 `GET /api/holdings/analyze/stream`(SSE)。板块消息留作下期。
+- **盘中实时监控上线**：短线策略交易时段每 10 分钟盯持仓，跌破 -8% 或跌破 MA5 即清仓（盘中只卖不买，买入放收盘）。
 - **自动定时调度上线**：APScheduler 集成进 FastAPI，每交易日 18:00（北京时间）自动「更新行情 → daily_runner」，随 uvicorn 启动即生效，无需系统 cron。查询/手动触发：`/api/scheduler/status`、`POST /api/scheduler/run-now`。
 - **调仓机制升级**：短线/波段改为**信号驱动·增量换仓**（每日按打分决定换不换，持仓跌出宽限带才卖，强势保留以降换手），趋势保持周期调仓。
 - FastAPI 后端：20+ 接口覆盖账户/选股/评级/回测/股票数据，端到端测试通过。
@@ -78,7 +80,12 @@ Tier 4: 实盘 / ML     → 接券商 API、机器学习增强
 | | `paper_engine.py` | **模拟盘核心引擎（新）** |
 | | `paper.py` | 模拟盘 CLI |
 | | `daily_runner.py` | **每日运行器**（信号/周期调仓分流；`run_all` 供调度&CLI 共用）|
-| | `api/scheduler.py` | **APScheduler 定时任务**（每交易日 18:00 自动更新行情 + daily_runner）|
+| | `api/scheduler.py` | **APScheduler 定时任务**（18:00 行情+daily_runner / 盘中10min监控 / 18:30 持仓分析）|
+| **实盘持仓(新)** | `real_holding.py` | 实盘持仓 CRUD（与模拟盘隔离，表自动建）|
+| | `holding_analyzer.py` | 盘后全方位分析（5维评级+新闻/公告/研报+涨跌 → HTML 报告）|
+| | `notify.py` | SMTP 邮件（配置存 DB `notify_config`，前端录入）|
+| | `api/routes/holdings.py` | 持仓 CRUD + 分析触发(SSE)|
+| | `api/routes/notify.py` | SMTP 配置 + 测试邮件接口 |
 | **回测/验证** | `backtest_simple.py` | 基础回测（IC + 止损 + DB 写入）|
 | | `backtest_rolling.py` | 动态滚动调权重 |
 | | `walk_forward.py` | 样本外验证 |
@@ -225,8 +232,15 @@ python init_data.py --limit 2000              # 全市场 stock_basic + 估值
 - [x] ~~每日 cron 入口~~ ✅ daily_runner.py（`run_all` 可编程入口）
 - [x] ~~自动定时调度~~ ✅ APScheduler 集成进 FastAPI（每交易日 18:00 自动「更新行情 + daily_runner」，随 uvicorn 启动）
 - [x] ~~信号驱动调仓~~ ✅ 短线/波段每日增量换仓（跌出宽限带才换，强势保留），趋势保持周期
+- [x] ~~盘中实时监控~~ ✅ 短线交易时段每 10 分钟盯持仓，跌破 -8% / MA5 即清仓（盘中只卖不买）
 - [ ] 跑 1-3 个月积累真实数据（需 uvicorn 进程常驻）
 - [ ] 修复 pandas SQLAlchemy 警告（用 SQLAlchemy engine 替代 pymysql connection）
+
+### 实盘持仓分析（与模拟盘隔离）✅ **新上线**
+- [x] ~~实盘持仓 CRUD~~ ✅ real_holding.py（前端录入，表自动建）
+- [x] ~~盘后全方位分析~~ ✅ holding_analyzer.py（5 维评级 + 当天新闻/公告/研报 + 涨跌浮盈）
+- [x] ~~邮件推送~~ ✅ notify.py（SMTP，配置存 DB 由前端录入）+ 每交易日 18:30 自动发
+- [ ] 板块消息（行业板块行情/资金流/新闻）—— 下期，需接入板块数据源（现 industry 字段为空）
 
 ### 长期（Phase 3/4，1-2 周以上）
 - [ ] 实盘 API 对接（CTP / 通达信仿真）
