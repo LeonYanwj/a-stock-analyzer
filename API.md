@@ -3,7 +3,7 @@
 > **后端服务**: FastAPI 跑在 `8000` 端口
 > **启动命令**: `python -m uvicorn api.main:app --host 0.0.0.0 --port 8000`
 > **交互式文档**: 启动后访问 `http://localhost:8000/docs`（自动生成 Swagger UI）
-> **当前版本**: 0.2.0 | **总接口数**: 34
+> **当前版本**: 0.2.0 | **总接口数**: 42
 
 ---
 
@@ -20,6 +20,8 @@
 - [回测接口](#-回测接口) `/api/backtest`
 - [股票数据接口](#-股票数据接口) `/api/stocks`
 - [任务管理接口](#️-任务管理接口异步任务专用) `/api/tasks`
+- [实盘持仓接口](#-实盘持仓接口) `/api/holdings` ⭐
+- [通知接口](#-通知接口) `/api/notify` ⭐
 - [常见场景示例](#-常见场景示例前端组合用法)
 - [已知限制](#️-已知限制)
 - [部署 cheat sheet](#-部署-cheat-sheet)
@@ -127,6 +129,14 @@ curl "http://localhost:8000/api/tasks/xxx"
 | GET | `/api/tasks/history` | A | DB 归档任务历史 |
 | GET | `/api/tasks/{task_id}` | A | 单任务详情（内存 + DB fallback）|
 | DELETE | `/api/tasks/cleanup` | A | 清理内存任务表 |
+| GET | `/api/holdings` | A | 实盘持仓列表 ⭐ |
+| POST | `/api/holdings` | A | 录入/更新持仓 ⭐ |
+| PUT | `/api/holdings/{id}` | A | 修改持仓 ⭐ |
+| DELETE | `/api/holdings/{id}` | A | 删除持仓 ⭐ |
+| **GET** | **`/api/holdings/analyze/stream`** | **B** | 盘后全方位分析 SSE ⭐ |
+| GET | `/api/notify/config` | A | 查 SMTP 配置（脱敏）⭐ |
+| PUT | `/api/notify/config` | A | 设置 SMTP 配置 ⭐ |
+| POST | `/api/notify/test` | A* | 发测试邮件 ⭐ |
 
 > `A*` = 同步但调外网（仍可用，但前端建议改用 SSE 流式版）
 
@@ -689,6 +699,57 @@ curl "http://localhost:8000/api/tasks/history?name=backtest&status=done&limit=20
 
 ### `DELETE /api/tasks/cleanup?keep=100`
 **清理内存任务表**（DB 归档不动）
+
+---
+
+## 💼 实盘持仓接口
+
+> 记录**真实持仓**（与模拟盘 `/api/accounts` 完全隔离）。盘后 18:30 自动对每只持仓做
+> 全方位分析并邮件推送，也可手动触发。表由后端自动建，无需手动跑 schema。
+
+### `GET /api/holdings`
+实盘持仓列表。返回 `[{holding_id, ts_code, name, qty, cost, buy_date, note}]`
+
+### `POST /api/holdings`
+录入/更新一只持仓（同代码已存在则覆盖）。Body(JSON)：
+```json
+{"code":"600036","qty":500,"cost":38.0,"buy_date":"2026-05-20","note":"可选"}
+```
+- `code` 支持 6 位或带后缀，自动补全为 ts_code；`name` 不传则自动查
+- 返回 `{ok:true, holding_id}`
+
+### `PUT /api/holdings/{id}`
+修改持仓（部分字段）。Body：`{qty?, cost?, buy_date?, name?, note?}`
+
+### `DELETE /api/holdings/{id}`
+删除持仓。返回 `{ok:true, deleted:id}`；不存在 → `404 HOLDING_NOT_FOUND`
+
+### `GET /api/holdings/analyze/stream?strategy=swing&send=true` ⭐ SSE
+【模式 B】手动触发盘后全方位分析（调外网，分阶段推进度）。
+- 每只持仓：5 维评级 + 当天新闻/公告/研报原文 + 价格/涨跌/浮盈
+- `send=true` 同时发邮件（需先配好 `/api/notify/config`）
+- 事件：`{progress,msg}` 进度 / `{progress:100,result:{count,asof,mail,analyses}}` 完成 / `{error,message}` 失败
+
+---
+
+## 📧 通知接口
+
+> SMTP 邮件配置（**前端录入，存 DB**，不写死 config）。盘后分析报告发到这里。
+
+### `GET /api/notify/config`
+读 SMTP 配置（密码脱敏为 `******`）。未配置返回 `{configured:false}`
+
+### `PUT /api/notify/config`
+设置 SMTP 配置。Body(JSON)：
+```json
+{"smtp_host":"smtp.qq.com","smtp_port":465,"smtp_user":"you@qq.com",
+ "smtp_pass":"授权码","mail_to":"to@xx.com","enabled":true}
+```
+- `smtp_pass` 用邮箱的**授权码/应用密码**，不是登录密码
+- QQ邮箱 `smtp.qq.com:465`(SSL)，163 `smtp.163.com:465`
+
+### `POST /api/notify/test`
+发一封测试邮件验证配置。成功 `{ok:true,to}`；失败 → `400 MAIL_SEND_FAILED`（reason 含 SMTP 报错）
 
 ---
 
