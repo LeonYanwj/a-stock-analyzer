@@ -370,6 +370,40 @@ def list_terminated_accounts() -> pd.DataFrame:
             conn)
 
 
+def delete_account(account_id: int) -> dict:
+    """彻底删除账户（仅限已终止账户），连带清除其持仓/成交/权益/订单历史。
+
+    安全保护：运行中账户拒绝删除（返回 reason=STILL_ACTIVE，由调用方转 400）。
+    用单事务删除多表，保证要么全删要么全不删（不留孤儿数据）。
+
+    Returns: {deleted: bool, account_id, reason?, removed: {表名: 删除行数}}
+    """
+    acc = get_account(account_id)
+    if acc is None:
+        return {"deleted": False, "reason": "NOT_FOUND", "account_id": account_id}
+    if int(acc.get("is_active", 0)) == 1:
+        return {"deleted": False, "reason": "STILL_ACTIVE", "account_id": account_id}
+
+    removed = {}
+    conn = get_conn(autocommit=False)
+    try:
+        cur = conn.cursor()
+        # 先删子表再删主表，避免外键约束
+        for tbl in ("paper_position", "paper_trade", "paper_equity_daily", "paper_order"):
+            cur.execute(f"DELETE FROM {tbl} WHERE account_id=%s", (account_id,))
+            removed[tbl] = cur.rowcount
+        cur.execute("DELETE FROM paper_account WHERE account_id=%s", (account_id,))
+        removed["paper_account"] = cur.rowcount
+        conn.commit()
+        cur.close()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+    return {"deleted": True, "account_id": account_id, "removed": removed}
+
+
 def buy_equal_weight(account_id: int, picks: list, trade_date,
                      reason: str = "REBALANCE") -> dict:
     """按等权买入选股列表（每只 cash/N，1 手整数）"""

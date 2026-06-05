@@ -70,6 +70,26 @@ def get_account(account_id: int):
             for k, v in acc.items()}
 
 
+@router.delete("/{account_id}")
+def delete_account(account_id: int):
+    """彻底删除账户（仅限已终止账户）
+
+    - 运行中账户  → 400 ACCOUNT_STILL_ACTIVE（请先调 terminate 归档）
+    - 不存在      → 404 ACCOUNT_NOT_FOUND
+    - 已终止      → 删除账户及其持仓/成交/权益/订单历史，
+                    之后 /api/accounts?status=all 和 /api/accounts/history 都不再返回它
+    """
+    r = eng.delete_account(account_id)
+    if not r["deleted"]:
+        if r.get("reason") == "NOT_FOUND":
+            raise NotFound(f"账户 {account_id} 不存在", code="ACCOUNT_NOT_FOUND")
+        if r.get("reason") == "STILL_ACTIVE":
+            raise BadRequest("账户仍在运行中，请先调用 terminate 归档后再删除",
+                             code="ACCOUNT_STILL_ACTIVE")
+    return {"ok": True, "deleted": account_id, "removed": r["removed"],
+            "message": "账户及其历史记录已删除"}
+
+
 def _get_realtime_prices(ts_codes: list) -> dict:
     """拉一次全市场 spot，取出指定 ts_code 的最新价。失败返回空 dict。
 
