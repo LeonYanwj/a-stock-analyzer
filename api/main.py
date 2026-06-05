@@ -14,7 +14,8 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from api import errors as api_errors
 from api import scheduler as sched
-from api.routes import accounts, screen, rate, backtest, stocks, tasks, scheduler
+from api.routes import (accounts, screen, rate, backtest, stocks, tasks,
+                        scheduler, holdings, notify)
 
 
 @asynccontextmanager
@@ -54,6 +55,8 @@ app.include_router(backtest.router)
 app.include_router(stocks.router)
 app.include_router(tasks.router)
 app.include_router(scheduler.router)
+app.include_router(holdings.router)
+app.include_router(notify.router)
 
 
 @app.get("/")
@@ -70,6 +73,8 @@ def root():
             "stocks":    "/api/stocks",
             "tasks":     "/api/tasks (异步任务查询)",
             "scheduler": "/api/scheduler/status (定时任务状态) 或 POST /run-now 手动触发",
+            "holdings":  "/api/holdings (实盘持仓CRUD) + GET /analyze/stream 盘后分析(SSE)",
+            "notify":    "/api/notify/config (SMTP配置) + POST /test 测试邮件",
         }
     }
 

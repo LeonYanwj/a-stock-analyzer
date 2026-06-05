@@ -42,6 +42,15 @@ _last_intraday = {
     "detail": [],
 }
 
+# 盘后持仓分析报告最近一次状态
+_last_holding = {
+    "status": "never",   # never / ok / skip / error
+    "time": None,
+    "count": 0,
+    "mail": None,
+    "reason": None,
+}
+
 
 def refresh_quotes_for_active_positions(trade_date=None) -> int:
     """更新所有活跃账户持仓股的日线到最新（写回 market_daily）
@@ -155,6 +164,23 @@ def run_intraday_monitor():
                           sold=total_sold, detail=detail)
 
 
+def run_holding_report():
+    """盘后任务：对所有实盘持仓做全方位分析 + 邮件推送（每交易日 18:30）。"""
+    try:
+        import holding_analyzer
+        r = holding_analyzer.run_and_notify()
+        _last_holding.update(
+            status="ok" if r.get("ok") else "skip",
+            time=datetime.now().isoformat(),
+            count=r.get("count", 0),
+            mail=r.get("mail"),
+            reason=r.get("reason"))
+    except Exception as e:
+        _last_holding.update(status="error", time=datetime.now().isoformat(),
+                             reason=f"{type(e).__name__}: {e}")
+        traceback.print_exc()
+
+
 def trigger_now():
     """手动立即触发一次（后台线程跑，立即返回）。供 API 验证用。"""
     scheduler.add_job(run_daily_job, id="manual_run", replace_existing=True,
@@ -168,6 +194,9 @@ def get_status() -> dict:
     intraday = scheduler.get_job("intraday_job")
     intraday_next = (intraday.next_run_time.isoformat()
                      if intraday and intraday.next_run_time else None)
+    holding = scheduler.get_job("holding_job")
+    holding_next = (holding.next_run_time.isoformat()
+                    if holding and holding.next_run_time else None)
     return {
         "scheduler_running": scheduler.running,
         "next_run_time": next_run,
@@ -177,6 +206,11 @@ def get_status() -> dict:
             "next_run_time": intraday_next,
             "cron": "mon-fri 9:30-11:30 & 13:00-15:00 每10分钟 (Asia/Shanghai)",
             "last_run": dict(_last_intraday),
+        },
+        "holding_report": {
+            "next_run_time": holding_next,
+            "cron": "mon-fri 18:30 (Asia/Shanghai)",
+            "last_run": dict(_last_holding),
         },
     }
 
@@ -202,6 +236,14 @@ def start_scheduler():
         name="盘中每10分钟监控短线持仓(止损/MA5)",
         max_instances=1, coalesce=True,
         misfire_grace_time=120,   # 盘中时效强，过期 2 分钟就不补
+    )
+    # 盘后持仓分析：每交易日 18:30（排在 daily_runner 18:00 之后，行情已更新）
+    scheduler.add_job(
+        run_holding_report,
+        CronTrigger(day_of_week="mon-fri", hour=18, minute=30),
+        id="holding_job",
+        name="盘后 实盘持仓全方位分析+邮件",
+        max_instances=1, coalesce=True, misfire_grace_time=3600,
     )
     scheduler.start()
 
