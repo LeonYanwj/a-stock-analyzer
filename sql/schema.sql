@@ -291,6 +291,40 @@ CREATE TABLE IF NOT EXISTS api_task_history (
     INDEX idx_created (created_at)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT 'API 异步任务历史归档';
 
+-- 19. 全市场每日评级快照
+CREATE TABLE IF NOT EXISTS stock_rating_daily (
+    trade_date          DATE        NOT NULL,
+    ts_code             VARCHAR(10) NOT NULL,
+    strategy            VARCHAR(50) NOT NULL,
+    score               DECIMAL(12,6),
+    grade               VARCHAR(2),
+    rank_num            INT,
+    percentile          DECIMAL(10,6),
+    trend_state         VARCHAR(12) NOT NULL DEFAULT 'unknown',
+    financial_risk_level VARCHAR(12) NOT NULL DEFAULT 'unknown',
+    risk_flags          JSON,
+    factor_values       JSON,
+    created_at          TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at          TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    PRIMARY KEY (trade_date, ts_code, strategy),
+    INDEX idx_rating_code (ts_code, strategy, trade_date),
+    INDEX idx_rating_rank (trade_date, strategy, rank_num)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT '全市场每日策略评级快照';
+
+-- 20. 自选股
+CREATE TABLE IF NOT EXISTS watchlist (
+    watch_id    INT AUTO_INCREMENT PRIMARY KEY,
+    ts_code     VARCHAR(10) NOT NULL UNIQUE,
+    name        VARCHAR(50),
+    group_name  VARCHAR(50) NOT NULL DEFAULT '默认',
+    strategy    VARCHAR(50) NOT NULL DEFAULT 'swing',
+    note        VARCHAR(500),
+    is_active   TINYINT NOT NULL DEFAULT 1,
+    created_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    INDEX idx_watch_active (is_active, group_name)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT '自选股及其日报策略';
+
 -- ===== 初始数据 =========================================================
 
 -- 把现有 3 个策略灌进去（用 INSERT IGNORE 避免重复）

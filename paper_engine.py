@@ -130,6 +130,18 @@ def get_close_price(ts_code: str, trade_date: date) -> float:
         return float(row[0]) if row and row[0] else None
 
 
+def get_exact_close_price(ts_code: str, trade_date: date) -> float:
+    """只返回指定交易日的收盘价；停牌或行情未更新时返回 None。"""
+    with get_conn() as conn:
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT close FROM market_daily WHERE ts_code=%s AND adjust='qfq' "
+            "AND trade_date=%s LIMIT 1", (ts_code, trade_date))
+        row = cur.fetchone()
+        cur.close()
+    return float(row[0]) if row and row[0] else None
+
+
 def get_ma(ts_code: str, trade_date, n: int = 5) -> float:
     """N 日均线：trade_date 之前最近 N 个交易日收盘均值。
 
@@ -460,7 +472,7 @@ def is_rebal_day(account_id: int, trade_date) -> bool:
 
 # -------------------- 信号驱动·增量换仓 --------------------
 def rebalance_by_signal(account_id: int, trade_date, top_n_target: int = None,
-                        limit: int = 500, keep_buffer: float = None,
+                        limit: int = 0, keep_buffer: float = None,
                         min_score: float = 0.0) -> dict:
     """信号驱动·增量换仓（短线/波段策略每个交易日跑）
 
@@ -558,6 +570,114 @@ def rebalance_by_signal(account_id: int, trade_date, top_n_target: int = None,
     }
 
 
+def rebalance_by_rating(account_id: int, trade_date, ratings: pd.DataFrame,
+                        top_n_target: int = None, min_score_gap: float = 0.20) -> dict:
+    """按每日评级复查持仓，并择优替换；没有足够好的候选时保持现金。"""
+    from financial_risk import assess_stock_eligibility
+    from rating_store import get_previous_rating
+    from rating_rules import rating_exit_reason
+    from strategies import calc_optimal_top_n
+
+    trade_date = _norm_date(trade_date)
+    acc = get_account(account_id)
+    if acc is None:
+        return {"error": "account_not_found"}
+    if ratings is None or ratings.empty:
+        return {"error": "ratings_empty"}
+
+    strategy = acc["strategy_name"]
+    equity = float(acc["current_equity"])
+    top_n_target = top_n_target or calc_optimal_top_n(equity)
+    ranked = ratings.dropna(subset=["score"]).sort_values("score", ascending=False)
+    pos = get_positions(account_id)
+
+    sold_detail = []
+    replacement_thresholds = []
+    held_before = pos["ts_code"].tolist() if not pos.empty else []
+
+    for _, position in pos.iterrows():
+        tc = position["ts_code"]
+        current = ranked.loc[tc] if tc in ranked.index else None
+        reason = None
+        current_score = None
+
+        if current is None:
+            eligibility = assess_stock_eligibility(tc)
+            reason = rating_exit_reason(None, None, eligibility)
+        else:
+            current_score = float(current["score"])
+            previous = get_previous_rating(tc, strategy, trade_date)
+            reason = rating_exit_reason(current, previous)
+
+        if not reason:
+            continue
+        price = get_exact_close_price(tc, trade_date)
+        if price is None:
+            sold_detail.append({"ts_code": tc, "action": "skip", "reason": "NO_TODAY_PRICE"})
+            continue
+        execute_sell(account_id, tc, int(position["qty"]), price, trade_date,
+                     reason="RATING_EXIT")
+        replacement_thresholds.append((current_score if current_score is not None else 0.0)
+                                      + min_score_gap)
+        sold_detail.append({"ts_code": tc, "action": "sold", "reason": reason,
+                            "score": current_score})
+
+    held_after_df = get_positions(account_id)
+    held_after = set(held_after_df["ts_code"].tolist()) if not held_after_df.empty else set()
+    slots = max(0, top_n_target - len(held_after))
+    thresholds = sorted(replacement_thresholds, reverse=True)
+    thresholds.extend([0.0] * max(0, slots - len(thresholds)))
+
+    candidate_rows = ranked[
+        ranked["grade"].isin(["S", "A", "B"])
+        & (ranked["financial_risk_level"] != "high")
+        & (ranked["trend_state"] != "bad")
+        & (ranked["score"] > 0)
+    ]
+    bought_detail = []
+    candidates = [(tc, row) for tc, row in candidate_rows.iterrows() if tc not in held_after]
+    cash = float(get_account(account_id)["current_cash"])
+
+    for threshold in thresholds[:slots]:
+        bought_for_slot = False
+        while candidates:
+            tc, row = candidates.pop(0)
+            if float(row["score"]) < threshold:
+                candidates.insert(0, (tc, row))
+                break
+            price = get_exact_close_price(tc, trade_date)
+            if price is None:
+                bought_detail.append({"ts_code": tc, "action": "skip", "reason": "NO_TODAY_PRICE"})
+                continue
+            bought_count = len([d for d in bought_detail if d.get("action") == "bought"])
+            remaining_slots = max(1, slots - bought_count)
+            budget = min(equity / top_n_target, cash / remaining_slots)
+            qty = int(budget / (price * (1 + SLIPPAGE_RATE)) / 100) * 100
+            while qty >= 100 and calc_buy_cost(price, qty)[0] > min(budget, cash):
+                qty -= 100
+            if qty < 100:
+                bought_detail.append({"ts_code": tc, "action": "skip", "reason": "INSUFFICIENT_CASH"})
+                continue
+            result = execute_buy(account_id, tc, qty, price, trade_date, reason="RATING_ENTRY")
+            cash -= result["cost"]
+            held_after.add(tc)
+            bought_detail.append({"ts_code": tc, "action": "bought",
+                                  "score": float(row["score"]), "grade": row["grade"]})
+            bought_for_slot = True
+            break
+        if not bought_for_slot and not candidates:
+            break
+
+    return {
+        "held_before": len(held_before),
+        "kept": len(held_after) - len([d for d in bought_detail if d.get("action") == "bought"]),
+        "sold": len([d for d in sold_detail if d.get("action") == "sold"]),
+        "bought": len([d for d in bought_detail if d.get("action") == "bought"]),
+        "top_n": top_n_target,
+        "sell_detail": sold_detail,
+        "buy_detail": bought_detail,
+        "cash_allowed": True,
+    }
 # -------------------- 止损 --------------------
 def check_stoploss(account_id: int, trade_date) -> dict:
     """检查持仓收益是否触发止损"""
@@ -567,7 +687,7 @@ def check_stoploss(account_id: int, trade_date) -> dict:
         return {"triggered": 0, "details": []}
     triggered = []
     for _, p in positions.iterrows():
-        price = get_close_price(p["ts_code"], trade_date)
+        price = get_exact_close_price(p["ts_code"], trade_date)
         if price is None:
             continue
         ret = price / float(p["avg_cost"]) - 1

@@ -15,6 +15,7 @@ import traceback
 from datetime import date, datetime, time, timedelta
 
 from apscheduler.schedulers.background import BackgroundScheduler
+from apscheduler.executors.pool import ThreadPoolExecutor
 from apscheduler.triggers.cron import CronTrigger
 
 import paper_engine as eng
@@ -23,7 +24,10 @@ import paper_engine as eng
 DAILY_HOUR = 18
 DAILY_MINUTE = 0
 
-scheduler = BackgroundScheduler(timezone="Asia/Shanghai")
+scheduler = BackgroundScheduler(
+    timezone="Asia/Shanghai",
+    executors={"default": ThreadPoolExecutor(max_workers=1)},
+)
 
 # 最近一次运行状态，供 GET /api/scheduler/status 查询
 _last_run = {
@@ -45,6 +49,14 @@ _last_intraday = {
 # 盘后持仓分析报告最近一次状态
 _last_holding = {
     "status": "never",   # never / ok / skip / error
+    "time": None,
+    "count": 0,
+    "mail": None,
+    "reason": None,
+}
+
+_last_watchlist = {
+    "status": "never",
     "time": None,
     "count": 0,
     "mail": None,
@@ -95,6 +107,14 @@ def refresh_quotes_for_active_positions(trade_date=None) -> int:
 def run_daily_job(trade_date=None):
     """调度主任务：先更新行情，再跑 daily_runner。失败不抛出（记录到状态）。"""
     import daily_runner
+
+    run_date = trade_date or date.today()
+    if not is_trade_day(run_date):
+        _last_run.update(
+            status="skip", started_at=datetime.now().isoformat(),
+            finished_at=datetime.now().isoformat(), quotes_updated=0,
+            detail="非交易日，跳过每日评级与模拟盘操作")
+        return
 
     _last_run.update(status="running", started_at=datetime.now().isoformat(),
                      finished_at=None, detail="更新持仓股行情中...")
@@ -181,6 +201,27 @@ def run_holding_report():
         traceback.print_exc()
 
 
+def run_watchlist_report():
+    """每交易日 19:00 汇总自选股评级和消息并发送邮件。"""
+    now = datetime.now()
+    if not is_trade_day(now.date()):
+        _last_watchlist.update(
+            status="skip", time=now.isoformat(), reason="not_trade_day")
+        return
+    try:
+        import watchlist_analyzer
+        result = watchlist_analyzer.analyze(send=True)
+        _last_watchlist.update(
+            status="ok" if result.get("ok") else "skip",
+            time=now.isoformat(), count=result.get("count", 0),
+            mail=result.get("mail"), reason=result.get("reason"))
+    except Exception as e:
+        _last_watchlist.update(
+            status="error", time=now.isoformat(),
+            reason=f"{type(e).__name__}: {e}")
+        traceback.print_exc()
+
+
 def trigger_now():
     """手动立即触发一次（后台线程跑，立即返回）。供 API 验证用。"""
     scheduler.add_job(run_daily_job, id="manual_run", replace_existing=True,
@@ -197,6 +238,9 @@ def get_status() -> dict:
     holding = scheduler.get_job("holding_job")
     holding_next = (holding.next_run_time.isoformat()
                     if holding and holding.next_run_time else None)
+    watchlist = scheduler.get_job("watchlist_job")
+    watchlist_next = (watchlist.next_run_time.isoformat()
+                      if watchlist and watchlist.next_run_time else None)
     return {
         "scheduler_running": scheduler.running,
         "next_run_time": next_run,
@@ -211,6 +255,11 @@ def get_status() -> dict:
             "next_run_time": holding_next,
             "cron": "mon-fri 18:30 (Asia/Shanghai)",
             "last_run": dict(_last_holding),
+        },
+        "watchlist_report": {
+            "next_run_time": watchlist_next,
+            "cron": "mon-fri 19:00 (Asia/Shanghai)",
+            "last_run": dict(_last_watchlist),
         },
     }
 
@@ -243,7 +292,14 @@ def start_scheduler():
         CronTrigger(day_of_week="mon-fri", hour=18, minute=30),
         id="holding_job",
         name="盘后 实盘持仓全方位分析+邮件",
-        max_instances=1, coalesce=True, misfire_grace_time=3600,
+        max_instances=1, coalesce=True, misfire_grace_time=10800,
+    )
+    scheduler.add_job(
+        run_watchlist_report,
+        CronTrigger(day_of_week="mon-fri", hour=19, minute=0),
+        id="watchlist_job",
+        name="自选股每日评级和消息汇总邮件",
+        max_instances=1, coalesce=True, misfire_grace_time=10800,
     )
     scheduler.start()
 

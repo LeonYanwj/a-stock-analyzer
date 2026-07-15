@@ -15,7 +15,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from api import errors as api_errors
 from api import scheduler as sched
 from api.routes import (accounts, screen, rate, backtest, stocks, tasks,
-                        scheduler, holdings, notify)
+                        scheduler, holdings, notify, watchlist)
 
 
 @asynccontextmanager
@@ -29,8 +29,8 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="A 股量化系统 API",
-    description="模拟盘、选股、评级、回测、数据查询",
-    version="0.2.0",
+    description="全市场评级、模拟盘、自选股日报、选股、回测与数据查询",
+    version="0.3.0",
     lifespan=lifespan,
 )
 
@@ -57,13 +57,14 @@ app.include_router(tasks.router)
 app.include_router(scheduler.router)
 app.include_router(holdings.router)
 app.include_router(notify.router)
+app.include_router(watchlist.router)
 
 
 @app.get("/")
 def root():
     return {
         "name": "A 股量化系统 API",
-        "version": "0.2.0",
+        "version": "0.3.0",
         "docs": "/docs",
         "endpoints": {
             "accounts":  "/api/accounts  (含 POST /{id}/auto-rebalance/async 和 daily-run/async)",
@@ -75,6 +76,7 @@ def root():
             "scheduler": "/api/scheduler/status (定时任务状态) 或 POST /run-now 手动触发",
             "holdings":  "/api/holdings (实盘持仓CRUD) + GET /analyze/stream 盘后分析(SSE)",
             "notify":    "/api/notify/config (SMTP配置) + POST /test 测试邮件",
+            "watchlist": "/api/watchlist (自选股) + POST /report/async 每日汇总",
         }
     }
 

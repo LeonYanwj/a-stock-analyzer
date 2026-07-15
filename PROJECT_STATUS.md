@@ -47,10 +47,12 @@ Tier 4: 实盘 / ML     → 接券商 API、机器学习增强
 | | **整体** | **█████████░ 90%** |
 
 **最新动态**：
+- **全市场每日评级与模拟盘日评上线**：覆盖全部沪深主板，排除创业板/科创板/北交所、ST、次新股和财务高风险股票；评级写入 `stock_rating_daily`。模拟盘每天复查，硬风险/D 级立即退出，普通转弱连续两天退出；候选不够强时允许空仓。
+- **自选股日报上线**：新增 `/api/watchlist` CRUD 和异步日报接口；每交易日 19:00 汇总评级变化、价格、新闻、公告、研报并复用 SMTP 配置发送邮件。
 - **实盘持仓分析模块上线**（与模拟盘 paper_* 完全隔离）：前端录入真实持仓 → 每交易日 **18:30 自动**对每只持仓做全方位分析（5 维评级 + 当天新闻/公告/研报原文 + 价格/涨跌/浮盈）→ **邮件推送**。接口 `/api/holdings`(CRUD)、`/api/notify/config`(SMTP)，手动触发 `GET /api/holdings/analyze/stream`(SSE)。板块消息留作下期。
 - **盘中实时监控上线**：短线策略交易时段每 10 分钟盯持仓，跌破 -8% 或跌破 MA5 即清仓（盘中只卖不买，买入放收盘）。
 - **自动定时调度上线**：APScheduler 集成进 FastAPI，每交易日 18:00（北京时间）自动「更新行情 → daily_runner」，随 uvicorn 启动即生效，无需系统 cron。查询/手动触发：`/api/scheduler/status`、`POST /api/scheduler/run-now`。
-- **调仓机制升级**：短线/波段改为**信号驱动·增量换仓**（每日按打分决定换不换，持仓跌出宽限带才卖，强势保留以降换手），趋势保持周期调仓。
+- **调仓机制升级**：所有模拟盘账户每天按策略评级复查。财务高风险、ST/退市风险和 D 级立即退出；普通趋势连续两天转弱才退出，新候选不够强时允许空仓。
 - FastAPI 后端：20+ 接口覆盖账户/选股/评级/回测/股票数据，端到端测试通过。
 - 启动: `uvicorn api.main:app --host 0.0.0.0 --port 8000`；文档: `/docs` (Swagger UI)
 
@@ -65,13 +67,15 @@ Tier 4: 实盘 / ML     → 接券商 API、机器学习增强
 | **数据层** | `data/fetcher.py` | AKShare 多源数据获取（新浪/东财/同花顺/巨潮）|
 | | `data/db.py` | MySQL 访问层（连接 + UPSERT + 各表读写）|
 | **策略/因子** | `factors/compute.py` | 14 个因子计算 |
-| | `strategies.py` | 3 个策略 profile + 调仓模式(信号/周期) + 资金量自适应持仓数 |
+| | `strategies.py` | 3 个策略 profile + 资金量自适应持仓数 |
 | | `selector.py` | 横截面打分排序 |
 | | `news_scorer.py` | 关键词消息面评分 |
 | | `pattern_recognizer.py` | 4 个 K 线形态识别 |
 | | `single_grader.py` | 单股 5 维度评级（rate.py 用）|
 | | `grader.py` | 多维度评级（早期版本）|
 | | `universe.py` | 沪深主板筛选 |
+| | `financial_risk.py` | 财务暴雷、ST 和退市风险硬过滤 |
+| | `rating_store.py` | 全市场每日评级快照与趋势状态 |
 | **入口** | `screen.py` | 全市场选股 |
 | | `rate.py` | 单股深度评级 |
 | | `main.py` | 旧单股回测（保留兼容）|
@@ -79,8 +83,10 @@ Tier 4: 实盘 / ML     → 接券商 API、机器学习增强
 | | `query_backtest.py` | 历史回测查询工具 |
 | | `paper_engine.py` | **模拟盘核心引擎（新）** |
 | | `paper.py` | 模拟盘 CLI |
-| | `daily_runner.py` | **每日运行器**（信号/周期调仓分流；`run_all` 供调度&CLI 共用）|
-| | `api/scheduler.py` | **APScheduler 定时任务**（18:00 行情+daily_runner / 盘中10min监控 / 18:30 持仓分析）|
+| | `daily_runner.py` | **每日运行器**（全市场评级、持仓日评、择优替换；`run_all` 供调度&CLI 共用）|
+| | `api/scheduler.py` | **APScheduler 定时任务**（18:00 全市场评级+模拟盘 / 盘中10min监控 / 18:30 持仓分析 / 19:00 自选股邮件）|
+| **自选股** | `watchlist.py` | 自选股 CRUD、分组和评级策略 |
+| | `watchlist_analyzer.py` | 自选股评级变化、行情和消息汇总邮件 |
 | **实盘持仓(新)** | `real_holding.py` | 实盘持仓 CRUD（与模拟盘隔离，表自动建）|
 | | `holding_analyzer.py` | 盘后全方位分析（5维评级+新闻/公告/研报+涨跌 → HTML 报告）|
 | | `notify.py` | SMTP 邮件（配置存 DB `notify_config`，前端录入）|
@@ -179,8 +185,8 @@ http://localhost:8000/api/stocks?search=平安      # 股票搜索
 python paper.py create --name "swing-A" --capital 100000 --strategy swing
 python paper.py list
 
-# 自动调仓（一键完成：选股 + 清仓 + 买入 + 快照）
-python paper.py auto-rebalance --account 1 --limit 500
+# 自动调仓（一键完成：全市场评级 + 持仓日评 + 择优替换 + 快照）
+python paper.py auto-rebalance --account 1 --limit 0
 
 # 手动操作
 python paper.py buy --account 1 --code 600487.SH --qty 200 --price 75
@@ -231,7 +237,7 @@ python init_data.py --limit 2000              # 全市场 stock_basic + 估值
 - [x] ~~多策略账户并行~~ ✅ 已建 short/swing/trend 三账户
 - [x] ~~每日 cron 入口~~ ✅ daily_runner.py（`run_all` 可编程入口）
 - [x] ~~自动定时调度~~ ✅ APScheduler 集成进 FastAPI（每交易日 18:00 自动「更新行情 + daily_runner」，随 uvicorn 启动）
-- [x] ~~信号驱动调仓~~ ✅ 短线/波段每日增量换仓（跌出宽限带才换，强势保留），趋势保持周期
+- [x] ~~每日评级调仓~~ ✅ 全策略每日复查，连续转弱退出，候选至少 B 级且需明显更强，否则空仓
 - [x] ~~盘中实时监控~~ ✅ 短线交易时段每 10 分钟盯持仓，跌破 -8% / MA5 即清仓（盘中只卖不买）
 - [ ] 跑 1-3 个月积累真实数据（需 uvicorn 进程常驻）
 - [ ] 修复 pandas SQLAlchemy 警告（用 SQLAlchemy engine 替代 pymysql connection）
@@ -262,7 +268,7 @@ python init_data.py --limit 2000              # 全市场 stock_basic + 估值
 7. **持仓数设计**：不硬编码档位，按 `单股仓位约束` 公式算区间
 8. **东财反爬**：spot/资金流接口被封，但单股新闻/公告/研报能通；用新浪 spot 兜底
 9. **MySQL UPSERT**：pymysql `with conn` 默认 ROLLBACK，已强制 autocommit=True
-10. **调仓机制（信号 vs 周期）**：短线/波段为「信号驱动·增量换仓」——每日重算打分，持仓跌出「保留宽限带」(top_n×1.3~1.8) 才卖、空仓补新晋强势股，强势持仓不动以降换手；趋势保持周期调仓。配置见 `strategies.py` 的 `REBAL_MODE` / `KEEP_BUFFER`。解决了短线「持有 1-3 天却 7 天才调仓」的矛盾。
+10. **每日评级调仓**：所有模拟盘策略每天复查持仓；财务高风险、ST/退市风险和 D 级立即退出，普通趋势连续两个评级日转弱才退出。替换候选至少 B 级，且综合分需高出被替换股票 0.20；没有合格候选时保留现金。
 11. **定时调度用 APScheduler 而非系统 cron**：BackgroundScheduler 集成进 FastAPI lifespan，随 uvicorn 启动，每交易日 18:00 串行「更新行情 → daily_runner」。优点：代码即配置、跨平台一致；前提：进程需常驻，多 worker 部署需防重复执行（已设 max_instances=1）。
 
 ---

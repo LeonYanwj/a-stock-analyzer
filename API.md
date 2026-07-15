@@ -3,7 +3,7 @@
 > **后端服务**: FastAPI 跑在 `8000` 端口
 > **启动命令**: `python -m uvicorn api.main:app --host 0.0.0.0 --port 8000`
 > **交互式文档**: 启动后访问 `http://localhost:8000/docs`（自动生成 Swagger UI）
-> **当前版本**: 0.2.0 | **总接口数**: 42
+> **当前版本**: 0.3.0 | **总接口数**: 50
 
 ---
 
@@ -22,6 +22,7 @@
 - [任务管理接口](#️-任务管理接口异步任务专用) `/api/tasks`
 - [实盘持仓接口](#-实盘持仓接口) `/api/holdings` ⭐
 - [通知接口](#-通知接口) `/api/notify` ⭐
+- [自选股接口](#-自选股接口) `/api/watchlist` ⭐
 - [常见场景示例](#-常见场景示例前端组合用法)
 - [已知限制](#️-已知限制)
 - [部署 cheat sheet](#-部署-cheat-sheet)
@@ -137,6 +138,11 @@ curl "http://localhost:8000/api/tasks/xxx"
 | GET | `/api/notify/config` | A | 查 SMTP 配置（脱敏）⭐ |
 | PUT | `/api/notify/config` | A | 设置 SMTP 配置 ⭐ |
 | POST | `/api/notify/test` | A* | 发测试邮件 ⭐ |
+| GET | `/api/watchlist` | A | 查询自选股 |
+| POST | `/api/watchlist` | A | 添加或重新启用自选股 |
+| PUT | `/api/watchlist/{id}` | A | 修改分组、策略和备注 |
+| DELETE | `/api/watchlist/{id}` | A | 删除自选股 |
+| POST | `/api/watchlist/report/async` | C | 生成自选股日报并按配置发邮件 |
 
 > `A*` = 同步但调外网（仍可用，但前端建议改用 SSE 流式版）
 
@@ -385,15 +391,15 @@ curl -N "http://localhost:8000/api/accounts/1/positions/stream"
 **触发止损检查**
 
 ### `POST /api/accounts/{id}/auto-rebalance/async` ⭐ 新
-**【异步】自动调仓**：跑选股 + 清仓 + 等权买入 + 保存快照
+**【异步】自动调仓**：全市场评级 + 持仓日评 + 择优替换 + 保存快照。没有足够强的候选时保留现金，不会强制满仓。
 
 参数：
-- `limit`: 股票池规模（默认 500）
+- `limit`: 股票池规模（`0`=全部沪深主板，默认 `0`）
 - `asof`: 截面日期 YYYY-MM-DD（可选，默认今天）
 - `enable_news`: 是否启用消息面（默认 false）
 
 ```bash
-curl -X POST "http://localhost:8000/api/accounts/1/auto-rebalance/async?limit=500"
+curl -X POST "http://localhost:8000/api/accounts/1/auto-rebalance/async?limit=0"
 # → {"task_id":"xxx","status":"running","tip":"轮询 GET /api/tasks/xxx"}
 ```
 
@@ -411,13 +417,13 @@ curl -X POST "http://localhost:8000/api/accounts/1/auto-rebalance/async?limit=50
 ```
 
 ### `POST /api/accounts/{id}/daily-run/async` ⭐ 新
-**【异步】跑单账户每日流程**：止损 → 判断调仓日 → 调仓 → 快照 → 复盘
+**【异步】跑单账户每日流程**：止损 → 每日评级复查 → 择优替换 → 快照 → 复盘
 
 等价命令行：`python daily_runner.py --account {id} --date YYYYMMDD`
 
 参数：
 - `asof`: 日期（可选，默认今天）
-- `limit`: 选股阶段股票池规模（默认 500）
+- `limit`: 选股阶段股票池规模（`0`=全部沪深主板，默认 `0`）
 - `dry_run`: true 时只看会做什么，不写入（默认 false）
 
 ```bash
@@ -442,7 +448,7 @@ curl "http://localhost:8000/api/screen?strategy=swing&capital=100000&limit=200"
 - `strategy`: short_term / swing / trend / ic_optimized
 - `capital`: 资金量（元），用于自动算 top_n
 - `top`: 直接指定持仓数（覆盖 capital 自动算）
-- `limit`: 股票池规模（0=全部，默认 500）
+- `limit`: 股票池规模（`0`=全部沪深主板，默认 `0`）
 - `lookback`: 历史回看天数（默认 60）
 - `enable_news`: 是否消息面精筛（true/false）
 
@@ -750,6 +756,33 @@ curl "http://localhost:8000/api/tasks/history?name=backtest&status=done&limit=20
 
 ### `POST /api/notify/test`
 发一封测试邮件验证配置。成功 `{ok:true,to}`；失败 → `400 MAIL_SEND_FAILED`（reason 含 SMTP 报错）
+
+---
+
+## 自选股接口
+
+自选股与实盘持仓、模拟盘相互独立。每只自选股可以指定分组、评级策略和备注。
+交易日 19:00 自动汇总价格、评级变化、趋势、财务风险、新闻、公告和研报并发送邮件。
+
+### `GET /api/watchlist?active_only=true`
+查询自选股列表。
+
+### `POST /api/watchlist`
+添加或重新启用自选股。Body：
+
+```json
+{"code":"600036","group_name":"银行","strategy":"swing","note":"等待回调"}
+```
+
+### `PUT /api/watchlist/{id}`
+修改 `name`、`group_name`、`strategy`、`note` 或 `is_active`。
+
+### `DELETE /api/watchlist/{id}`
+删除一条自选股记录。
+
+### `POST /api/watchlist/report/async?send=true`
+异步生成日报；`send=true` 时复用 `/api/notify/config` 的 SMTP 配置发送邮件。
+返回 `task_id`，通过 `/api/tasks/{task_id}` 查询进度和结果。
 
 ---
 

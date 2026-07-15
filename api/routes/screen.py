@@ -47,7 +47,7 @@ def run_screen_sync(
     strategy: str = "swing",
     capital: float = 0,
     top: int = 0,
-    limit: int = 500,
+    limit: int = 0,
     lookback: int = 60,
     enable_news: bool = False,
 ):
@@ -72,7 +72,7 @@ def run_screen_async(
     strategy: str = "swing",
     capital: float = 0,
     top: int = 0,
-    limit: int = 500,
+    limit: int = 0,
     lookback: int = 60,
     enable_news: bool = False,
 ):

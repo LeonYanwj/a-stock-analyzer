@@ -23,6 +23,8 @@ from universe import get_universe
 from factors import compute_all_factors
 from selector import score, top_n
 from news_scorer import compute_news_score
+from financial_risk import attach_financial_risk
+from rating_store import prepare_snapshot, save_snapshot
 from strategies import (get_factor_weights, list_strategies,
                         calc_optimal_top_n, warn_if_capital_too_small,
                         position_range, validate_top_n)
@@ -31,20 +33,61 @@ from strategies import (get_factor_weights, list_strategies,
 LOOKBACK_DAYS = 60
 TOP_N = 50
 API_SLEEP = 0.05   # AKShare 无硬限流，留极小间隔避免触发风控
+_BASE_MARKET_CACHE = {}
+_BASE_CACHE_TTL_SECONDS = 15 * 60
 
 
 def fetch_history_panel(fetcher: DataFetcher, ts_codes, start, end) -> pd.DataFrame:
-    """循环拉单股历史日线，拼成长表"""
+    """批量查库，只有缺失或行情未更新的股票才逐只调用外部接口。"""
     frames, fail = [], 0
-    total = len(ts_codes)
+    ts_codes = list(dict.fromkeys(ts_codes))
+    expected_dates = fetcher.get_trade_dates(start, end)
+    expected_last = pd.to_datetime(expected_dates[-1]) if expected_dates else None
+    start_sql = pd.to_datetime(start).date()
+    end_sql = pd.to_datetime(end).date()
+
+    db_panel = pd.DataFrame()
+    try:
+        from data.db import get_conn
+        chunks = []
+        with get_conn() as conn:
+            for offset in range(0, len(ts_codes), 500):
+                batch = ts_codes[offset:offset + 500]
+                placeholders = ",".join(["%s"] * len(batch))
+                sql = (
+                    "SELECT * FROM market_daily WHERE adjust='qfq' "
+                    "AND trade_date BETWEEN %s AND %s "
+                    f"AND ts_code IN ({placeholders})")
+                chunks.append(pd.read_sql(sql, conn, params=[start_sql, end_sql] + batch))
+        chunks = [chunk for chunk in chunks if not chunk.empty]
+        if chunks:
+            db_panel = pd.concat(chunks, ignore_index=True)
+            db_panel["trade_date"] = pd.to_datetime(db_panel["trade_date"])
+    except Exception as e:
+        print(f"  [warn] 批量行情查库失败，降级逐股获取: {type(e).__name__}: {e}")
+
+    usable = set()
+    if not db_panel.empty:
+        coverage = db_panel.groupby("ts_code")["trade_date"].agg(["count", "max"])
+        for tc, row in coverage.iterrows():
+            latest_ok = expected_last is None or row["max"] >= expected_last
+            if row["count"] >= 31 and latest_ok:
+                usable.add(tc)
+        if usable:
+            frames.append(db_panel[db_panel["ts_code"].isin(usable)])
+    missing = [tc for tc in ts_codes if tc not in usable]
+    if usable:
+        print(f"  [db] 行情完整 {len(usable)} 只，需增量获取 {len(missing)} 只")
+
+    total = len(missing)
     t0 = time.time()
-    for i, ts_code in enumerate(ts_codes, 1):
+    for i, ts_code in enumerate(missing, 1):
         df = fetcher.get_daily(ts_code, start, end)
         if df is None or df.empty:
             fail += 1
         else:
             frames.append(df)
-        if i % 100 == 0 or i == total:
+        if total and (i % 100 == 0 or i == total):
             elapsed = time.time() - t0
             rate = i / elapsed if elapsed > 0 else 0
             eta = (total - i) / rate if rate > 0 else 0
@@ -54,14 +97,80 @@ def fetch_history_panel(fetcher: DataFetcher, ts_codes, start, end) -> pd.DataFr
             time.sleep(API_SLEEP)
     if not frames:
         raise RuntimeError("没有拉到任何历史数据")
-    return pd.concat(frames, ignore_index=True)
+    panel = pd.concat(frames, ignore_index=True)
+    return panel.drop_duplicates(["ts_code", "trade_date"], keep="last")
+
+
+def build_market_factors(asof_dt, lookback: int, limit: int = 0,
+                         verbose: bool = True):
+    """拉取一次全市场基础数据并计算策略无关的原始因子。"""
+    asof = asof_dt.strftime("%Y%m%d")
+    cache_key = (asof, int(lookback), int(limit))
+    cached = _BASE_MARKET_CACHE.get(cache_key)
+    if cached and time.time() - cached["cached_at"] <= _BASE_CACHE_TTL_SECONDS:
+        if verbose:
+            print("  复用本次运行的全市场基础因子缓存")
+        return (cached["fetcher"], cached["universe"].copy(),
+                cached["factors"].copy(), cached["effective_date"])
+
+    fetcher = DataFetcher()
+    start = (asof_dt - timedelta(days=lookback + 30)).strftime("%Y%m%d")
+    universe = get_universe(
+        fetcher, exclude_st=True, min_list_days=365, asof_date=asof_dt)
+    fin_df = fetcher.get_financial_latest_all()
+    universe = attach_financial_risk(universe, fin_df)
+    excluded_financial = int((~universe["eligible"]).sum())
+    universe = universe[universe["eligible"]].copy()
+    if limit > 0:
+        universe = universe.head(limit)
+    if universe.empty:
+        raise RuntimeError("股票池为空，请检查 market_stock_basic 的上市日期和 ST 数据")
+    if verbose:
+        print(f"  股票池: {len(universe)} 只（财务高风险剔除 {excluded_financial} 只）")
+
+    spot = fetcher.get_market_snapshot()
+    fund_flow = fetcher.get_fund_flow_snapshot(window="5日排行")
+    lxsz_df = fetcher.get_stock_rank_lxsz()
+    if verbose and not fin_df.empty:
+        print(f"  financial: {len(fin_df)} 只覆盖")
+    if verbose:
+        print(f"  拉取 {len(universe)} 只股票 {lookback}+ 天日线...")
+    panel = fetch_history_panel(fetcher, universe["ts_code"].tolist(), start, asof)
+
+    spot_cols = [c for c in ["ts_code", "pe_ttm", "pb", "total_mv", "circ_mv"]
+                 if c in spot.columns]
+    panel = panel.merge(spot[spot_cols], on="ts_code", how="left")
+    if not fund_flow.empty:
+        flow_cols = [c for c in ["ts_code", "fund_inflow", "fund_outflow", "fund_net"]
+                     if c in fund_flow.columns]
+        panel = panel.merge(fund_flow[flow_cols], on="ts_code", how="left")
+    if not lxsz_df.empty and "lxsz_days" in lxsz_df.columns:
+        panel = panel.merge(lxsz_df[["ts_code", "lxsz_days"]], on="ts_code", how="left")
+    if not fin_df.empty:
+        fin_cols = [c for c in ["ts_code", "roe", "gross_margin", "net_margin",
+                                "debt_ratio", "net_profit_yoy", "revenue_yoy"]
+                    if c in fin_df.columns]
+        panel = panel.merge(fin_df[fin_cols], on="ts_code", how="left")
+
+    factors = compute_all_factors(panel, asof_date=asof)
+    # 外部行情完全缺失的股票也保留一条 N/A 评级，便于追踪数据覆盖问题。
+    factors = factors.reindex(universe["ts_code"].tolist())
+    effective_date = pd.to_datetime(panel["trade_date"]).max().date()
+    _BASE_MARKET_CACHE.clear()
+    _BASE_MARKET_CACHE[cache_key] = {
+        "cached_at": time.time(), "fetcher": fetcher,
+        "universe": universe.copy(), "factors": factors.copy(),
+        "effective_date": effective_date,
+    }
+    return fetcher, universe, factors, effective_date
 
 
 def screen_market(strategy: str = "swing", capital: float = 0,
                   top_n_arg: int = 0, lookback: int = LOOKBACK_DAYS,
                   limit: int = 0, enable_news: bool = False,
                   refine: int = 100, news_weight: float = 0.15,
-                  verbose: bool = True) -> pd.DataFrame:
+                  verbose: bool = True, return_all: bool = False,
+                  persist_ratings: bool = True) -> pd.DataFrame:
     """全市场选股核心函数（可被其他脚本调用，如 paper.py）
 
     Returns:
@@ -76,53 +185,19 @@ def screen_market(strategy: str = "swing", capital: float = 0,
     else:
         top_actual = TOP_N
 
-    fetcher = DataFetcher()
     asof_dt = datetime.now()
     asof = asof_dt.strftime("%Y%m%d")
-    start = (asof_dt - timedelta(days=lookback + 30)).strftime("%Y%m%d")
 
     if verbose:
         print(f"[screen] strategy={strategy}, top={top_actual}, 截面日={asof}")
 
-    # 1. 股票池
-    universe = get_universe(fetcher, exclude_st=True, min_list_days=0)
-    if limit > 0:
-        universe = universe.head(limit)
-    if verbose:
-        print(f"  股票池: {len(universe)} 只")
-
-    # 2. spot + 资金流 + 量价齐升 + 财务（基本面）
-    spot = fetcher.get_market_snapshot()
-    fund_flow = fetcher.get_fund_flow_snapshot(window="5日排行")
-    lxsz_df = fetcher.get_stock_rank_lxsz()
-    fin_df = fetcher.get_financial_latest_all()
-    if verbose and not fin_df.empty:
-        print(f"  financial: {len(fin_df)} 只覆盖")
-
-    # 3. 历史日线
-    if verbose:
-        print(f"  拉取 {len(universe)} 只股票 {lookback}+ 天日线...")
-    panel = fetch_history_panel(fetcher, universe["ts_code"].tolist(), start, asof)
-
-    spot_cols = [c for c in ["ts_code", "pe_ttm", "pb", "total_mv", "circ_mv"] if c in spot.columns]
-    panel = panel.merge(spot[spot_cols], on="ts_code", how="left")
-    if not fund_flow.empty:
-        flow_cols = [c for c in ["ts_code", "fund_inflow", "fund_outflow", "fund_net"]
-                     if c in fund_flow.columns]
-        panel = panel.merge(fund_flow[flow_cols], on="ts_code", how="left")
-    if not lxsz_df.empty and "lxsz_days" in lxsz_df.columns:
-        panel = panel.merge(lxsz_df[["ts_code", "lxsz_days"]], on="ts_code", how="left")
-    # merge 基本面（roe / gross_margin 等）
-    if not fin_df.empty:
-        fin_cols = [c for c in ["ts_code", "roe", "gross_margin", "net_margin",
-                                "debt_ratio", "net_profit_yoy", "revenue_yoy"]
-                    if c in fin_df.columns]
-        panel = panel.merge(fin_df[fin_cols], on="ts_code", how="left")
-
-    # 4. 因子 + 打分
-    factors = compute_all_factors(panel, asof_date=asof)
+    fetcher, universe, factors, effective_date = build_market_factors(
+        asof_dt, lookback=lookback, limit=limit, verbose=verbose)
     weights = get_factor_weights(strategy)
     scored = score(factors, weights=weights)
+    risk_cols = ["ts_code", "financial_risk_level", "financial_risk_flags"]
+    risk_meta = universe[[c for c in risk_cols if c in universe.columns]].set_index("ts_code")
+    scored = scored.join(risk_meta, how="left")
 
     # 4.5 消息面二次精筛（可选）
     if enable_news:
@@ -144,9 +219,22 @@ def screen_market(strategy: str = "swing", capital: float = 0,
         scored.loc[in_refine, "score"] = scored.loc[in_refine, "final_score"]
         scored = scored.sort_values("score", ascending=False)
 
-    picks = top_n(scored, n=top_actual)
     name_map = universe.set_index("ts_code")[["name"]]
-    return picks.join(name_map, how="left")
+    scored = scored.join(name_map, how="left")
+
+    snapshot = prepare_snapshot(scored, effective_date, strategy)
+    if persist_ratings and not snapshot.empty:
+        try:
+            saved = save_snapshot(snapshot)
+            if verbose:
+                print(f"  每日评级快照: {saved} 只")
+        except Exception as e:
+            if verbose:
+                print(f"  [warn] 评级快照保存失败: {type(e).__name__}: {e}")
+
+    if return_all:
+        return snapshot
+    return top_n(snapshot, n=top_actual)
 
 
 def main():
@@ -193,93 +281,22 @@ def main():
     print("沪深主板多因子选股（AKShare）")
     print("=" * 60)
 
-    fetcher = DataFetcher()
-    asof_dt = datetime.now()
-    asof = asof_dt.strftime("%Y%m%d")
-    # 多留 30 天缓冲覆盖周末/节假日
-    start = (asof_dt - timedelta(days=args.lookback + 30)).strftime("%Y%m%d")
-    print(f"\n截面日: {asof}    回看起点: {start}")
-
-    # 1. 股票池（沪深主板，排除创业板/科创板/北交所/ST）
-    print("\n[1/4] 筛选沪深主板股票池...")
-    universe = get_universe(fetcher, exclude_st=True, min_list_days=0)
-    if args.limit > 0:
-        universe = universe.head(args.limit)
-    print(f"  股票池: {len(universe)} 只")
-
-    # 2. 全市场截面快照（PE/PB/市值/换手率）+ 资金流 + 量价齐升榜
-    print("\n[2/4] 获取全市场截面快照 + 资金流 + 量价齐升...")
-    spot = fetcher.get_market_snapshot()
-    print(f"  spot: {len(spot)} 只")
-    fund_flow = fetcher.get_fund_flow_snapshot(window="5日排行")
-    print(f"  fund_flow: {len(fund_flow)} 只" if not fund_flow.empty else "  fund_flow: 不可用（资金流因子会跳过）")
-    lxsz_df = fetcher.get_stock_rank_lxsz()
-    fin_df = fetcher.get_financial_latest_all()
-    if not fin_df.empty:
-        print(f"  financial: {len(fin_df)} 只覆盖")
-
-    # 3. 历史日线（用于动量/反转/波动率因子）
-    print(f"\n[3/4] 拉取 {len(universe)} 只股票近 {args.lookback}+ 天日线...")
-    panel = fetch_history_panel(fetcher, universe["ts_code"].tolist(), start, asof)
-    print(f"  面板: {len(panel)} 行 × {panel['ts_code'].nunique()} 只")
-
-    # 把 spot 截面字段 merge 到 panel（compute 时 snap 取最新日截面）
-    spot_cols = [c for c in ["ts_code", "pe_ttm", "pb", "total_mv", "circ_mv"] if c in spot.columns]
-    panel = panel.merge(spot[spot_cols], on="ts_code", how="left")
-
-    # 把资金流字段也 merge 进 panel
-    if not fund_flow.empty:
-        flow_cols = [c for c in ["ts_code", "fund_inflow", "fund_outflow", "fund_net"]
-                     if c in fund_flow.columns]
-        panel = panel.merge(fund_flow[flow_cols], on="ts_code", how="left")
-
-    # 把量价齐升 lxsz_days merge 进 panel（榜外股票自动是 NaN，后续 fillna(0)）
-    if not lxsz_df.empty and "lxsz_days" in lxsz_df.columns:
-        panel = panel.merge(lxsz_df[["ts_code", "lxsz_days"]], on="ts_code", how="left")
-    # 把基本面（roe/gross_margin 等）merge 进 panel
-    if not fin_df.empty:
-        fin_cols = [c for c in ["ts_code", "roe", "gross_margin", "net_margin",
-                                "debt_ratio", "net_profit_yoy", "revenue_yoy"]
-                    if c in fin_df.columns]
-        panel = panel.merge(fin_df[fin_cols], on="ts_code", how="left")
-
-    # 4. 因子 + 打分（按策略选权重）
-    print(f"\n[4/4] 计算因子 + 打分排序... (strategy={args.strategy})")
-    factors = compute_all_factors(panel, asof_date=asof)
-    print(f"  因子表: {factors.shape[0]} 只 × {factors.shape[1]} 因子")
-    weights = get_factor_weights(args.strategy)
-    scored = score(factors, weights=weights)
-
-    # 4.5  消息面二次精筛（可选，--news 开启）
-    if args.news:
-        valid_top = scored.dropna(subset=["score"]).head(args.refine)
-        print(f"\n[5/5] 对 Top {len(valid_top)} 候选拉取消息面（新闻+公告+研报）...")
-        news_scores = {}
-        for i, tc in enumerate(valid_top.index, 1):
-            news_df = fetcher.get_stock_news(tc)
-            disc_df = fetcher.get_stock_disclosure(tc, days=30)
-            rsr_df = fetcher.get_stock_research(tc)
-            ns = compute_news_score(news_df, disc_df, rsr_df)
-            if not pd.isna(ns["news_score"]):
-                news_scores[tc] = ns["news_score"]
-            if i % 20 == 0 or i == len(valid_top):
-                print(f"  [{i}/{len(valid_top)}]  累计有新闻数据: {len(news_scores)}")
-        # 将 news_score 加到原 score 形成 final_score
-        scored["news_score"] = pd.Series(news_scores)
-        scored["news_bonus"] = scored["news_score"].fillna(0) * args.news_weight
-        scored["final_score"] = scored["score"] + scored["news_bonus"]
-        # 仅对 Top refine 集内的股票使用 final_score 重排；其他保持原序
-        in_refine = scored.index.isin(valid_top.index)
-        scored.loc[in_refine, "score"] = scored.loc[in_refine, "final_score"]
-        scored = scored.sort_values("score", ascending=False)
-        print(f"  消息面已加权（系数 {args.news_weight}），重排序完成")
-
-    picks = top_n(scored, n=args.top)
-
-    # 5. 输出
-    name_map = universe.set_index("ts_code")[["name"]]
-    out = picks.join(name_map, how="left")
-    cols = ["name", "score", "valid_factors",
+    out = screen_market(
+        strategy=args.strategy,
+        capital=args.capital,
+        top_n_arg=args.top,
+        lookback=args.lookback,
+        limit=args.limit,
+        enable_news=args.news,
+        refine=args.refine,
+        news_weight=args.news_weight,
+        verbose=True,
+    )
+    asof = (pd.to_datetime(out["trade_date"].iloc[0]).strftime("%Y%m%d")
+            if not out.empty and "trade_date" in out.columns
+            else datetime.now().strftime("%Y%m%d"))
+    cols = ["name", "score", "grade", "rank_num", "trend_state",
+            "financial_risk_level", "valid_factors", "weight_coverage",
             "ep_ttm", "bp", "mom_30", "reversal_5", "small_size", "low_vol", "liquidity",
             "main_inflow", "inflow_ratio", "macd_hist", "macd_slope", "lxsz",
             "pattern_score", "news_score", "news_bonus"]

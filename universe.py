@@ -11,7 +11,8 @@ MAIN_BOARD_PREFIXES = (
 
 def filter_main_board(stock_list: pd.DataFrame,
                       exclude_st: bool = True,
-                      min_list_days: int = 365) -> pd.DataFrame:
+                      min_list_days: int = 365,
+                      asof_date=None) -> pd.DataFrame:
     """从 tushare stock_basic 结果中筛出沪深主板股票
 
     Args:
@@ -26,22 +27,30 @@ def filter_main_board(stock_list: pd.DataFrame,
     df = df[is_main]
 
     if exclude_st:
-        name_upper = df["name"].str.upper()
+        name_upper = df["name"].fillna("").str.upper()
         is_st = name_upper.str.contains("ST") | name_upper.str.contains("退")
+        if "is_st" in df.columns:
+            is_st = is_st | (pd.to_numeric(df["is_st"], errors="coerce").fillna(0) == 1)
         df = df[~is_st]
 
     if min_list_days > 0 and "list_date" in df.columns:
-        ld = pd.to_datetime(df["list_date"], format="%Y%m%d", errors="coerce")
+        raw = df["list_date"]
+        compact = raw.astype(str).str.replace("-", "", regex=False)
+        ld = pd.to_datetime(compact, format="%Y%m%d", errors="coerce")
         if ld.notna().any():
-            cutoff = datetime.now() - timedelta(days=min_list_days)
-            # list_date 缺失的保留（无法判断），有值的按 cutoff 过滤
-            df = df[(ld <= cutoff) | ld.isna()]
+            anchor = pd.to_datetime(asof_date) if asof_date is not None else datetime.now()
+            cutoff = anchor - timedelta(days=min_list_days)
+            # 上市日缺失不再静默放行，避免次新股绕过过滤。
+            df = df[ld <= cutoff]
             df["list_date"] = ld
 
     return df.reset_index(drop=True)
 
 
-def get_universe(fetcher, exclude_st: bool = True, min_list_days: int = 365) -> pd.DataFrame:
+def get_universe(fetcher, exclude_st: bool = True, min_list_days: int = 365,
+                 asof_date=None) -> pd.DataFrame:
     """获取沪深主板股票池"""
     all_stocks = fetcher.get_stock_list(exchange="", list_status="L")
-    return filter_main_board(all_stocks, exclude_st=exclude_st, min_list_days=min_list_days)
+    return filter_main_board(
+        all_stocks, exclude_st=exclude_st,
+        min_list_days=min_list_days, asof_date=asof_date)

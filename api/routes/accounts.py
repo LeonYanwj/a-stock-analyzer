@@ -290,10 +290,7 @@ def save_snapshot(account_id: int, asof: Optional[date] = None):
 
 # -------------------- 异步任务接口 --------------------
 def _do_auto_rebalance(task, account_id: int, limit: int, asof, enable_news: bool):
-    """异步任务：跑 screen 选股 + 清仓 + 等权买入 + 快照
-
-    对应 paper.py cmd_auto_rebalance 的逻辑
-    """
+    """异步任务：全市场评级 + 持仓复查 + 择优替换 + 快照。"""
     from screen import screen_market
 
     task.report(5, "查账户...")
@@ -302,40 +299,35 @@ def _do_auto_rebalance(task, account_id: int, limit: int, asof, enable_news: boo
         raise NotFound(f"账户 {account_id} 不存在", code="ACCOUNT_NOT_FOUND")
 
     task.report(10, f"跑 {account['strategy_name']} 选股...")
-    picks_df = screen_market(
+    ratings = screen_market(
         strategy=account["strategy_name"],
         capital=float(account["current_equity"]),
         limit=limit,
         enable_news=enable_news,
         verbose=False,
+        return_all=True,
+        persist_ratings=True,
     )
-    if picks_df.empty:
-        task.report(100, "选股结果为空，跳过调仓")
+    if ratings.empty:
+        task.report(100, "评级结果为空，跳过调仓")
         return {
             "account_id": account_id,
             "skipped": True,
-            "reason": "screen 返回空，未执行调仓",
+            "reason": "全市场评级为空，未执行调仓",
         }
-    picks = picks_df.index.tolist()
 
-    task.report(70, f"清仓 + 买入 {len(picks)} 只...")
-    sold = eng.sell_all(account_id, asof, reason="REBALANCE")
-    bought = eng.buy_equal_weight(account_id, picks, asof, reason="REBALANCE")
+    trade_date = asof or date.today()
+    task.report(70, "复查持仓并择优替换...")
+    rebalance = eng.rebalance_by_rating(account_id, trade_date, ratings)
 
     task.report(95, "保存权益快照...")
-    total_equity = eng.save_equity_snapshot(account_id, asof)
+    total_equity = eng.save_equity_snapshot(account_id, trade_date)
 
     return {
         "account_id": account_id,
-        "asof": str(asof) if asof else None,
+        "asof": str(trade_date),
         "strategy": account["strategy_name"],
-        "sold": {"n": sold["n_sold"], "revenue": sold["total_revenue"]},
-        "bought": {
-            "n": bought["n_bought"],
-            "spent": bought["total_spent"],
-            "skipped": [{"ts_code": tc, "reason": why} for tc, why in bought.get("skipped", [])],
-        },
-        "picks": picks,
+        "rebalance": rebalance,
         "total_equity": float(total_equity),
     }
 
@@ -343,14 +335,14 @@ def _do_auto_rebalance(task, account_id: int, limit: int, asof, enable_news: boo
 @router.post("/{account_id}/auto-rebalance/async")
 def auto_rebalance_async(
     account_id: int,
-    limit: int = 500,
+    limit: int = 0,
     asof: Optional[date] = None,
     enable_news: bool = False,
 ):
-    """【异步】自动调仓：跑 screen 选股 + 清仓 + 等权买入 + 保存快照
+    """【异步】自动调仓：全市场评级 + 持仓日评 + 择优替换 + 保存快照
 
     流程：
-      1. POST /api/accounts/{id}/auto-rebalance/async?limit=500
+      1. POST /api/accounts/{id}/auto-rebalance/async?limit=0
          → 返回 {"task_id": "xxx"}
       2. GET /api/tasks/{task_id}
          → 轮询直到 status=done，result 含调仓结果
@@ -404,10 +396,10 @@ def _do_daily_run(task, account_id: int, asof, limit: int, dry_run: bool):
 def daily_run_async(
     account_id: int,
     asof: Optional[date] = None,
-    limit: int = 500,
+    limit: int = 0,
     dry_run: bool = False,
 ):
-    """【异步】跑单账户的每日流程：检查止损 → 判断调仓日 → 调仓 → 快照 → 复盘
+    """【异步】跑单账户每日流程：止损 → 每日评级复查 → 择优替换 → 快照 → 复盘
 
     等价于命令行：
         python daily_runner.py --account {id} --date YYYYMMDD

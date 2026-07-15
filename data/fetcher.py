@@ -193,7 +193,14 @@ class DataFetcher:
             with get_conn() as conn:
                 df = pd.read_sql(
                     "SELECT f.ts_code, f.report_date, f.roe, f.gross_margin, "
-                    "f.net_margin, f.net_profit_yoy, f.revenue_yoy, f.debt_ratio "
+                    "f.net_margin, f.net_profit, f.net_profit_yoy, f.revenue, "
+                    "f.revenue_yoy, f.debt_ratio, "
+                    "(SELECT p.roe FROM market_financial p "
+                    " WHERE p.ts_code=f.ts_code AND p.report_date<f.report_date "
+                    " ORDER BY p.report_date DESC LIMIT 1) AS prev_roe, "
+                    "(SELECT p.report_date FROM market_financial p "
+                    " WHERE p.ts_code=f.ts_code AND p.report_date<f.report_date "
+                    " ORDER BY p.report_date DESC LIMIT 1) AS prev_report_date "
                     "FROM market_financial f "
                     "INNER JOIN ("
                     "  SELECT ts_code, MAX(report_date) AS max_date "
@@ -206,13 +213,21 @@ class DataFetcher:
         if df.empty:
             return df
 
-        # ROE 季度年化（pandas datetime 操作）
+        # ROE 季度年化；最新期和上一期必须使用相同口径后再比较。
         df["report_date"] = pd.to_datetime(df["report_date"])
-        def _annualize(row):
-            month = row["report_date"].month
+        df["prev_report_date"] = pd.to_datetime(df["prev_report_date"], errors="coerce")
+
+        def _annualize(value, report_date):
+            if pd.isna(value) or pd.isna(report_date):
+                return None
+            month = report_date.month
             mult = {3: 4.0, 6: 2.0, 9: 4.0 / 3, 12: 1.0}.get(month, 1.0)
-            return row["roe"] * mult if pd.notna(row["roe"]) else None
-        df["roe"] = df.apply(_annualize, axis=1)
+            return value * mult
+
+        df["roe"] = df.apply(
+            lambda row: _annualize(row["roe"], row["report_date"]), axis=1)
+        df["prev_roe"] = df.apply(
+            lambda row: _annualize(row["prev_roe"], row["prev_report_date"]), axis=1)
         return df
 
     # ------------------------------------------------------------------
@@ -610,6 +625,18 @@ class DataFetcher:
     # ------------------------------------------------------------------
     def get_stock_list(self, exchange="", list_status="L"):
         """全市场股票列表，字段与 Tushare 接口对齐"""
+        try:
+            from data.db import get_conn
+            with get_conn() as conn:
+                df = pd.read_sql(
+                    "SELECT ts_code, symbol, name, area, industry, list_date, "
+                    "is_active, is_st FROM market_stock_basic WHERE is_active=1",
+                    conn)
+            if not df.empty:
+                return df
+        except Exception:
+            pass
+
         cache_name = "stock_list_ak"
         cached = self._load_cache(cache_name)
         if cached is not None:

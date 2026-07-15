@@ -84,6 +84,13 @@ def compute_all_factors(panel: pd.DataFrame, asof_date: pd.Timestamp) -> pd.Data
     mom_30 = _ret_n(30)
     reversal_5 = -_ret_n(5)
 
+    # 趋势诊断字段（不直接进入加权分，用于每日持仓健康检查）
+    last_close = close_wide.iloc[-1]
+    ma5 = close_wide.rolling(5, min_periods=5).mean().iloc[-1]
+    ma20 = close_wide.rolling(20, min_periods=20).mean().iloc[-1]
+    ma5_gap = last_close / ma5 - 1
+    ma20_gap = last_close / ma20 - 1
+
     # 波动率（20日日收益标准差，取负）
     pct_wide = close_wide.pct_change()
     if len(pct_wide) >= 20:
@@ -100,9 +107,11 @@ def compute_all_factors(panel: pd.DataFrame, asof_date: pd.Timestamp) -> pd.Data
         macd_dif = ema12 - ema26
         macd_dea = macd_dif.ewm(span=9, adjust=False).mean()
         macd_hist_ts = macd_dif - macd_dea
-        macd_hist = macd_hist_ts.iloc[-1]
+        # 用收盘价归一化，避免高价股仅因价格尺度更大而获得更高 MACD。
+        macd_hist = macd_hist_ts.iloc[-1] / close_wide.iloc[-1]
         if len(macd_hist_ts) >= 6:
-            macd_slope = macd_hist_ts.iloc[-1] - macd_hist_ts.iloc[-6]
+            macd_slope = ((macd_hist_ts.iloc[-1] - macd_hist_ts.iloc[-6])
+                          / close_wide.iloc[-1])
         else:
             macd_slope = pd.Series(dtype=float)
     else:
@@ -120,7 +129,12 @@ def compute_all_factors(panel: pd.DataFrame, asof_date: pd.Timestamp) -> pd.Data
 
     # 资金流因子（来自 fund_flow 快照 merge 进 panel，截面值）
     if "fund_net" in snap.columns:
-        main_inflow = pd.to_numeric(snap["fund_net"], errors="coerce")
+        fund_net = pd.to_numeric(snap["fund_net"], errors="coerce")
+        if "circ_mv" in snap.columns:
+            circ_mv_for_flow = pd.to_numeric(snap["circ_mv"], errors="coerce")
+            main_inflow = fund_net / circ_mv_for_flow.where(circ_mv_for_flow > 0)
+        else:
+            main_inflow = fund_net
     else:
         main_inflow = pd.Series(dtype=float)
 
@@ -159,6 +173,8 @@ def compute_all_factors(panel: pd.DataFrame, asof_date: pd.Timestamp) -> pd.Data
         "bp":            bp,
         "mom_30":        mom_30,
         "reversal_5":    reversal_5,
+        "ma5_gap":       ma5_gap,
+        "ma20_gap":      ma20_gap,
         "small_size":    small_size,
         "low_vol":       low_vol,
         "liquidity":     liquidity,

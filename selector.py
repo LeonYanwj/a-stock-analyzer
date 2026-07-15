@@ -23,7 +23,8 @@ def zscore(s: pd.Series) -> pd.Series:
 
 def score(factors: pd.DataFrame,
           weights: dict = None,
-          min_valid_factors: int = 4) -> pd.DataFrame:
+          min_valid_factors: int = 4,
+          min_weight_coverage: float = 0.70) -> pd.DataFrame:
     """对因子表打分
 
     Args:
@@ -34,7 +35,7 @@ def score(factors: pd.DataFrame,
     返回：含 score 列的 DataFrame，按 score 降序
     """
     weights = weights or FACTOR_WEIGHTS
-    cols = [c for c in weights if c in factors.columns]
+    cols = [c for c in weights if c in factors.columns and weights[c] != 0]
 
     # 缩尾 + z-score
     z = pd.DataFrame(index=factors.index)
@@ -42,13 +43,18 @@ def score(factors: pd.DataFrame,
         z[c] = zscore(winsorize(factors[c]))
 
     valid_count = z.notna().sum(axis=1)
-    weighted = z.fillna(0.0) * pd.Series(weights)[cols]
-    total_w = pd.Series(weights)[cols].abs().sum()
-    raw_score = weighted.sum(axis=1) / total_w
+    active_weights = pd.Series(weights, dtype=float)[cols]
+    total_w = active_weights.abs().sum()
+    available_w = z.notna().mul(active_weights.abs(), axis=1).sum(axis=1)
+    coverage = available_w / total_w if total_w else 0.0
+    weighted = z.fillna(0.0).mul(active_weights, axis=1)
+    raw_score = weighted.sum(axis=1) / available_w.replace(0, np.nan)
 
     out = factors.copy()
     out["valid_factors"] = valid_count
-    out["score"] = raw_score.where(valid_count >= min_valid_factors)
+    out["weight_coverage"] = coverage
+    valid = (valid_count >= min_valid_factors) & (coverage >= min_weight_coverage)
+    out["score"] = raw_score.where(valid)
     return out.sort_values("score", ascending=False)
 
 
