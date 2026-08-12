@@ -1,89 +1,89 @@
-# A-Share Trade-Run Backend Design
+# A 股交易实例后端重构设计
 
-## Purpose
+## 1. 目标
 
-Rebuild the FastAPI and MySQL backend around auditable, user-started trade
-runs. The immediate workflow is manual execution in Huatai Securities: the
-backend generates complete plans, the user records actual fills, and the system
-measures drawdown-adjusted stability, benchmark-relative returns, and plan-to-
-fill deviations. The later broker-auto-trading workflow must reuse the same
-strategy, risk, plan, position, and audit path via a broker adapter.
+将 FastAPI + MySQL 后端重构为以“交易实例”为核心、可审计、可验证的个人 A 股交易系统。
 
-The first release does not submit broker orders, automate a broker UI, or
-treat free quotes as a guaranteed real-time feed. It supports A-share main
-board equities and ETFs only.
+第一阶段不接券商自动下单。后端生成完整交易计划，用户在华泰证券手工执行后回填实际成交；系统据此验证策略在回撤、成本、基准暴露和实际执行偏差后的稳定性。
 
-## Product Model
+最终接入合规券商 API 后，应复用同一套策略、风控、计划、持仓和审计链路，仅将手工执行适配器替换为券商执行适配器。
 
-A strategy is a reusable versioned template. A `trade_run` is one user-created
-instance of a strategy, with frozen capital, maximum exposure, asset scope,
-strategy version, risk version, and data policy. The frontend is a dashboard:
-the user creates and starts trade runs, sets capital buckets and exposure, sees
-plans and outcomes, enters manual fills, and may stop or soft-delete a run.
+首期不自动提交券商订单，不自动操作券商网页或 App，不将免费行情包装为实时行情。可交易范围仅为 A 股主板个股和 ETF。
 
-The system controls selection, sizing, entries, exits, pausing, liquidation
-plans, and ending while a run is active. It cannot automatically resume a
-paused run. Only the user can start or restart it. A soft delete hides a run
-from default views but retains its full history.
+## 2. 产品模型
 
-| Strategy | Holding horizon | Primary behavior |
+策略是可复用、可版本化的规则模板；`trade_run` 是用户启动的一笔独立交易实例。实例启动时冻结策略版本、资金桶、总仓位上限、资产范围、风险模型和数据策略。
+
+前端是交易概览台：用户创建并启动交易实例，填写资金桶与最大仓位，查看计划、持仓、绩效、数据状态和审计事件，回填手工成交，并可结束或逻辑删除交易实例。
+
+交易实例运行后，系统自主进行候选筛选、仓位计算、计划生成、退出判断、暂停、清仓计划和结束判断。系统暂停后不得自行恢复，只能由用户再次启动。用户逻辑删除实例时，所有历史永久保留。
+
+| 策略 | 持有周期 | 主要行为 |
 |---|---|---|
-| `short_term` | 1-3 trading days | Pre-market candidates and intraday conditional plans |
-| `medium_term` | 1-4 weeks | Trend, industry strength, periodic rebalancing |
-| `long_term` | 1-3 months | Trend, quality, low turnover |
+| `short_term` 短线 | 1-3 个交易日 | 盘前候选池与盘中条件计划 |
+| `medium_term` 中线 | 1-4 周 | 趋势、行业强度与周期调仓 |
+| `long_term` 长线 | 1-3 个月 | 趋势、质量、低换手与渐进退出 |
 
-Each strategy has independent runs, capital, positions, plans, and performance.
-The first release permits one `running` run per strategy family and unlimited
-historical, paused, ended, or deleted runs.
+三条策略拥有独立的交易实例、资金桶、计划、持仓和绩效。首期同一策略只允许一个 `running` 实例；可保留任意多历史、暂停、结束或已逻辑删除实例。
 
-## Architecture
+## 3. 系统架构
 
 ```text
-Frontend dashboard -> FastAPI -> trade-run orchestration
-  -> strategy/signal -> dynamic portfolio/risk -> order intent
-  -> ManualAdapter now / BrokerAdapter later -> fills
-  -> position, benchmark, performance, and audit services
-  -> MarketDataProvider: free providers now, formal provider later
+前端交易概览台
+  -> FastAPI API
+      -> 交易实例编排
+          -> 策略与信号服务
+          -> 动态组合与风险服务
+          -> 委托意图服务
+          -> 执行适配器
+               手工执行适配器（首期）
+               券商执行适配器（后期）
+          -> 持仓、基准、绩效与审计服务
+      -> 行情数据提供者抽象
+          免费数据源（首期）
+          正式实时数据源（后期）
   -> MySQL
 ```
 
-Existing data fetchers and factor utilities may be reused. The legacy
-`paper_account`, `paper_engine`, and `/api/accounts` model is not the new
-trading core and will be retired from the new API path.
+现有的数据抓取、因子计算和研究工具可以择优复用。旧 `paper_account`、`paper_engine` 与 `/api/accounts` 不再作为新交易核心，逐步退出新 API 路径。
 
-## Data Rules
+## 4. 数据规则
 
-Research data includes trading calendars, main-board/ETF master data, industry
-classification, adjusted daily bars, volume, amount, turnover, financial
-reports with availability dates, and benchmark prices. Execution-reference data
-includes unadjusted prices, prior close, price limits, suspension state, and
-latest quote observations. Adjusted prices are for research only; unadjusted
-prices are for plans and fills only.
+### 4.1 研究数据与执行参考数据分离
 
-Every decision input records provider, market timestamp, receipt timestamp,
-delay, completeness, and snapshot/version ID. AKShare/Tushare/public sources
-are acceptable for research and delayed observation mode. A missing timestamp,
-stale quote, unknown suspension/limit state, or unconfirmed tradability blocks
-a plan with an explicit code such as `QUOTE_STALE`, `LIMIT_STATUS_UNKNOWN`, or
-`SUSPENSION_UNKNOWN`. It never becomes an executable/real-time claim.
+研究数据包括：交易日历、主板/ETF 基础信息、行业分类、复权日线、成交量、成交额、换手率、财务报表及其公告可得日期、行业指数、宽基指数和 ETF 跟踪指数。
 
-## Domain Records
+执行参考数据包括：未复权价格、前收盘、涨跌停价、停复牌状态和最新报价观察值。
 
-| Record | Purpose | Rule |
+复权价格只用于研究与收益计算；未复权价格只用于计划价格区间和实际成交。两者不得混用。
+
+每个用于决策的输入必须记录：数据源、市场时间、系统接收时间、延迟、完整度和数据快照/版本标识。
+
+### 4.2 免费数据阶段
+
+AKShare、Tushare Pro 和公开数据源可用于研究、日线补齐和延迟行情观察，不能视为可靠实时交易行情。
+
+行情缺少有效时间、超过数据策略允许的延迟、无法确认停复牌/涨跌停，或无法确认证券可交易时，计划必须被阻塞，并明确返回 `QUOTE_STALE`、`LIMIT_STATUS_UNKNOWN`、`SUSPENSION_UNKNOWN` 等原因。系统不得将该计划展示为实时已触发或可自动下单。
+
+所有行情通过统一数据提供者接口访问，未来替换为正式实时行情时不改策略、计划和风控代码。
+
+## 5. 核心数据对象
+
+| 对象 | 作用 | 修改规则 |
 |---|---|---|
-| `strategy_definition`, `strategy_version` | Strategy family and frozen algorithm fingerprint | New versions only |
-| `trade_run` | One trading instance | Inputs immutable after start; state changes allowed |
-| `market_data_observation` | Data used in decisions | Append only |
-| `signal_plan` | Complete recommendation and evidence | Original content immutable |
-| `order_intent` | Risk-approved order representation | Original intent immutable; lifecycle updates allowed |
-| `execution_fill` | Manual or broker-confirmed fill | Append only; corrections compensate |
-| `run_position` | Position projection | Derived and rebuildable |
-| `risk_event`, `audit_event` | Abnormal conditions and state changes | Append only |
-| `benchmark_snapshot` | Evaluation reference values | Append only |
+| `strategy_definition`、`strategy_version` | 策略模板与算法指纹 | 新建版本，不覆盖旧版本 |
+| `trade_run` | 用户创建的一笔交易实例 | 启动参数冻结，状态可变 |
+| `market_data_observation` | 决策使用的行情/数据元信息 | 只追加 |
+| `signal_plan` | 完整交易建议及证据 | 原始内容不可改 |
+| `order_intent` | 已通过风控的委托意图 | 原始意图不可改，状态可更新 |
+| `execution_fill` | 手工或券商确认的实际成交 | 只追加，修正以反向记录实现 |
+| `run_position` | 基于成交派生的持仓投影 | 可重建，不允许用户直接修改 |
+| `risk_event`、`audit_event` | 风控、异常和状态变更 | 只追加 |
+| `benchmark_snapshot` | 评估使用的基准快照 | 只追加 |
 
-Only `execution_fill` changes cash and positions. Plans and intents do not.
+只有 `execution_fill` 可以改变资金和持仓事实；交易计划与委托意图不能直接改变资金或持仓。
 
-## State Machine
+## 6. 交易实例状态机
 
 ```text
 draft -> running -> paused -> running
@@ -91,66 +91,54 @@ draft -> running -> paused -> running
 draft/running/paused/ended -> deleted
 ```
 
-- `draft -> running` and `paused -> running`: user only.
-- `running -> paused` and `running -> ended`: system allowed with a risk/audit
-  event and evidence.
-- `* -> deleted`: user soft-delete only; deleted runs cannot restart.
-- Start atomically checks inputs, deletion, data dependencies, and no running
-  run with the same strategy.
-- A pause cancels or expires outstanding plans and prevents new intents.
-- An end may generate liquidation plans but cannot claim liquidation before
-  corresponding fills exist.
+- `draft -> running`、`paused -> running`：仅用户前端启动动作可触发。
+- `running -> paused`、`running -> ended`：系统可触发，但必须写入风控/审计事件与证据。
+- 任意状态 -> `deleted`：仅用户逻辑删除；`deleted` 后不得重新运行。
+- 启动时需原子校验：实例未删除、入参合法、数据依赖可用、同策略没有其他运行实例。
+- 暂停后取消或过期所有未完成计划，且不产生新委托意图。
+- 结束时允许生成清仓计划，但未获得对应成交前不得声称已清仓。
 
-## Plans, Risk, and Execution
+## 7. 计划、风控与执行
 
-The only valid flow is:
+唯一有效的交易路径为：
 
 ```text
-strategy -> signal -> risk validation -> order intent -> adapter -> fill
+策略 -> 信号 -> 风控校验 -> 委托意图 -> 执行适配器 -> 实际成交
 ```
 
-A plan contains run/strategy version, asset and type, side, suggested quantity,
-reference price, allowed range, trigger/invalidation, expiry, dynamic exit,
-data evidence, signal reasons, sizing evidence, selected benchmark, and every
-risk check. Its states are `generated`, `eligible`, `blocked`, `triggered`,
-`expired`, and `cancelled`.
+每条 `signal_plan` 必须包含：交易实例与策略版本、证券与资产类型、方向、建议数量、参考价格、允许价格区间、触发条件、失效条件、有效期、动态退出条件、数据证据、信号理由、仓位计算依据、选用基准和全部风控检查结果。
 
-Sizing uses a reproducible versioned risk model: signal strength, volatility,
-ATR, liquidity, industry concentration, existing exposure, and market state.
-It must reject insufficient cash, non-lot quantities, T+1 violations,
-suspension, price limits, price deviation, duplicates, stale data, and exposure
-violations. Users do not configure these daily, but every result is explainable.
+计划状态为 `generated`、`eligible`、`blocked`、`triggered`、`expired`、`cancelled`。
 
-`ManualAdapter` publishes plans for manual execution and records manual fills
-or non-fill reasons. `BrokerAdapter` later submits the same intent to an
-authorized API and appends broker-confirmed fills; it cannot bypass risk.
+动态仓位模型必须可复现，输入至少包括信号强度、波动率、ATR、流动性、行业集中度、已有风险暴露和市场状态；输出目标持仓数、建议数量和退出距离。即使用户不日常配置这些参数，系统仍必须阻塞：可用资金不足、非整手、T+1 不可卖、停牌、涨跌停、价格偏离、重复意图、过期数据或超过最大暴露的情况。
 
-## Runtime Schedule
+首期 `ManualAdapter` 仅发布可照抄计划并记录手工成交/未成交理由。后期 `BrokerAdapter` 使用同一委托意图向获得授权的券商 API 下单并写入券商确认成交，不能绕过风控。
 
-All jobs use Asia/Shanghai and confirmed trade days.
+## 8. 运行调度
 
-| Window | Behavior |
+所有任务使用 `Asia/Shanghai` 时区且只在确认的交易日运行。
+
+| 时间窗口 | 行为 |
 |---|---|
-| 08:45-09:20 | Validate previous data and benchmarks; generate conditional plans; block/pause on critical missing data |
-| 09:30-11:30, 13:00-14:50 | Evaluate unexpired plans against observations; check freshness, price range, limits, T+1, cash and risk; block with explicit reasons when uncertain |
-| 15:10-18:00 | Freeze inputs; process fills/non-fills; rebuild positions/cash/equity; compute performance and audit report |
+| 08:45-09:20 | 校验前一日数据与基准覆盖，生成条件交易计划；关键数据缺失则阻塞计划或暂停实例 |
+| 09:30-11:30、13:00-14:50 | 评估未过期计划的延迟行情观察值，检查时效、价格区间、涨跌停、T+1、资金和风控 |
+| 15:10-18:00 | 固化数据元信息，处理成交/未成交回填，重建持仓资金净值，计算绩效并生成审计报告 |
 
-A signal based on a day's close is usable only on a later trading day. It is
-never backdated as a same-day tradable signal.
+基于当天收盘价形成的信号最早只能在后续交易日使用，不能回写为当日盘中已可交易的信号。
 
-## Benchmarks and Performance
+## 9. 基准与绩效
 
-HS300 is market context, not the sole selection benchmark. Equity portfolios
-use a matching broad benchmark plus industry/style context; single-stock
-signals use their industry index plus broad/style comparison; ETFs use tracking
-indexes and, where available, comparable ETFs.
+沪深 300 仅作为市场总览，不能作为个股选股能力的唯一基准。
 
-Reports include absolute, realized and unrealized return, fees, maximum
-drawdown, benchmark-relative return, plan-to-fill delay, price deviation, fill
-ratio, and blocked/non-fill reasons. All values must be recomputable from
-frozen inputs and fills.
+- 个股组合：匹配宽基 + 行业/风格背景。
+- 单股信号：所属行业指数 + 宽基/风格比较。
+- ETF：跟踪指数；可获得时增加同类 ETF 比较。
 
-## API Contract
+绩效必须包含绝对收益、已实现/未实现收益、费用、最大回撤、相对基准收益、计划到成交延迟、价格偏差、成交比例和阻塞/未成交原因；所有指标必须能由冻结输入和成交记录独立复算。
+
+## 10. API 契约
+
+新 API 独立于旧账户接口：
 
 ```text
 GET    /api/dashboard
@@ -172,40 +160,41 @@ GET    /api/trade-runs/{run_id}/events
 GET    /api/system/data-status
 ```
 
-Run creation accepts name, strategy code, capital, maximum exposure, and asset
-types. Plans expose all manual-execution information and data/block status.
-Fills accept plan ID, side, code, timestamp, price, quantity, fees, source,
-and note; non-fills retain an outcome reason. Existing uniform error JSON is
-preserved, for example `STRATEGY_RUN_ALREADY_ACTIVE`.
+创建交易实例至少提交名称、策略代码、资金、最大仓位和资产类型。`POST /start` 是唯一使实例进入 `running` 的用户授权接口。
 
-`API.md` becomes the authoritative frontend contract with request/response
-examples, enums, pagination, error codes, and delayed-data semantics.
+计划接口必须返回执行手工交易所需的全部信息及数据/阻塞状态。成交回填包括计划 ID、方向、代码、时间、价格、数量、费用、来源和说明；未成交必须记录计划和原因。
 
-## Acceptance Criteria
+保留统一错误结构，例如：
 
-All tests use an isolated database/schema, not existing business data.
+```json
+{
+  "error": "STRATEGY_RUN_ALREADY_ACTIVE",
+  "message": "短线策略已有运行中的交易实例",
+  "detail": "active_run_id=run_xxx"
+}
+```
 
-1. State transitions prove user-only start/restart, no automatic resume,
-   soft-delete non-restartability, and one running run per strategy.
-2. Plans never affect cash or positions. Fill, projection, and audit writes are
-   atomic. Partial, absent, duplicate, and reversing fills are deterministic.
-3. Historical/replay code uses only data available at `as_of`; no same-close
-   execution of close-generated signals and no `datetime.now()` dependence.
-4. Stale/missing/unknown observations block plans visibly.
-5. Identical strategy version, snapshot, and run input yield identical plans,
-   sizes, explanations, and benchmark choice.
-6. Returns, drawdown, fees, fill deviation, and benchmarks are independently
-   recomputable.
-7. API contract tests lock frontend fields, errors, pagination, and soft delete.
+`API.md` 应成为前端唯一的接口依据，包含请求/响应示例、枚举、分页、错误码和延迟数据语义。
 
-## Milestones
+## 11. 验收标准
 
-| Milestone | Delivery | Exclusion |
+测试必须使用隔离数据库/schema，不修改既有业务数据。
+
+1. 状态机：仅用户可启动/恢复；系统不能自动恢复；软删除后不可启动；同策略只有一个运行实例。
+2. 账务：计划不改资金或持仓；成交、派生持仓和审计事件同事务；部分成交、未成交、重复成交和反向修正都有确定结果。
+3. 时间一致性：历史与回放仅用 `as_of` 前可得数据；收盘信号不能同收盘成交；不可依赖 `datetime.now()`。
+4. 数据降级：报价过期、时间缺失、停牌或涨跌停未知时，计划必须可见地阻塞。
+5. 可复现性：同策略版本、同数据快照和同实例输入，生成一致的计划、数量、理由和基准选择。
+6. 归因：收益、回撤、费用、计划与成交偏差、行业/风格及 ETF 基准均可独立复算。
+7. API 契约：固定前端字段、分页、错误码和软删除行为。
+
+## 12. 实施分期
+
+| 阶段 | 交付 | 不包含 |
 |---|---|---|
-| M1 | New schema, trade-run state machine, audit, strategy-version reads | Automatic decisions |
-| M2 | Manual plans, fill entry, projections, dashboard APIs | Broker submission |
-| M3 | Point-in-time snapshots, reliable research/backtest, benchmarks, performance, data status | Paid real-time feed |
-| M4 | Adapter interface, broker lifecycle, reconciliation, deployment hardening | Unauthorized broker connection |
+| M1 | 新表、交易实例状态机、审计、策略版本读取 | 自动策略决策 |
+| M2 | 手工计划、成交回填、持仓/资金派生、概览 API | 券商发单 |
+| M3 | 时点快照、可信研究/回测、基准、绩效、数据状态 | 付费实时行情 |
+| M4 | 执行适配器、券商订单生命周期、对账、部署加固 | 未授权券商连接 |
 
-M1-M3 are the first backend release. M4 begins only after manual evidence and
-an authorized broker/API channel are available.
+M1-M3 构成首个可验收后端版本。M4 仅在积累手工验证证据并获得合规券商/API 通道后开始。
