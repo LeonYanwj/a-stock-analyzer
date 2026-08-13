@@ -27,6 +27,8 @@ class Side(str, Enum):
 
 STRATEGY_CODES = {"short_term", "medium_term", "long_term"}
 ASSET_TYPES = {"stock", "etf"}
+SIGNAL_SOURCES = {"legacy", "new"}
+PLAN_WINDOWS = {"pre_market", "midday", "manual"}
 RUNNABLE_STATUSES = {RunStatus.DRAFT.value, RunStatus.PAUSED.value}
 
 

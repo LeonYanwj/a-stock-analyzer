@@ -11,13 +11,21 @@ class TradeRunStateTests(unittest.TestCase):
         self.service.repo.initialize()
 
     def create(self, strategy="short_term"):
-        return self.service.create_run("验证实例", strategy, 100000, 0.8, ["stock", "etf"])
+        return self.service.create_run("验证实例", strategy, 100000, 0.8, ["stock", "etf"], signal_source="legacy")
 
     def test_create_defaults_to_draft_and_freezes_version(self):
         run = self.create()
         self.assertEqual(run["status"], "draft")
         self.assertEqual(run["initial_capital"], 100000)
         self.assertEqual(run["frozen_config"]["strategy_version"], 1)
+
+    def test_primary_signal_source_is_required_and_shadow_is_automatic(self):
+        with self.assertRaises(TradeRunError) as ctx:
+            self.service.create_run("缺少体系", "short_term", 100000, 0.8, ["stock"])
+        self.assertEqual(ctx.exception.code, "SIGNAL_SOURCE_REQUIRED")
+        run = self.service.create_run("新体系", "short_term", 100000, 0.8, ["stock"], signal_source="new")
+        self.assertEqual(run["primary_signal_source"], "new")
+        self.assertEqual(run["shadow_signal_source"], "legacy")
 
     def test_pause_requires_explicit_restart(self):
         run = self.create()

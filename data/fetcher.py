@@ -755,6 +755,40 @@ class DataFetcher:
 
         return df
 
+    def get_etf_daily(self, ts_code, start_date, end_date) -> pd.DataFrame:
+        """获取 ETF 未复权研究日线并写入独立表。
+
+        此方法只适合收盘后更新，计划编排只能读取 ``as_of`` 之前已落库的日线，
+        不得以收盘后数据回写当天盘中信号。
+        """
+        try:
+            df = ak.fund_etf_hist_em(
+                symbol=ts_code_to_symbol(ts_code), period="daily",
+                start_date=str(start_date).replace("-", ""),
+                end_date=str(end_date).replace("-", ""), adjust="",
+            )
+        except Exception as exc:
+            print(f"  [warn] ETF {ts_code} 日线拉取失败: {type(exc).__name__}: {str(exc)[:80]}")
+            return pd.DataFrame()
+        if df is None or df.empty:
+            return pd.DataFrame()
+        df = df.rename(columns={
+            "日期": "trade_date", "开盘": "open", "最高": "high", "最低": "low",
+            "收盘": "close", "成交量": "vol", "成交额": "amount", "涨跌幅": "pct_chg",
+        })
+        df["ts_code"] = ts_code.upper()
+        df["trade_date"] = pd.to_datetime(df["trade_date"])
+        for column in ["open", "high", "low", "close", "vol", "amount", "pct_chg"]:
+            if column in df.columns:
+                df[column] = pd.to_numeric(df[column], errors="coerce")
+        try:
+            from data.db import get_conn, upsert_etf_daily
+            with get_conn() as conn:
+                upsert_etf_daily(conn, df)
+        except Exception as exc:
+            print(f"  [warn] ETF {ts_code} 日线写入失败: {type(exc).__name__}: {str(exc)[:80]}")
+        return df
+
     # ------------------------------------------------------------------
     # 交易日历
     # ------------------------------------------------------------------

@@ -15,6 +15,10 @@ DB_USER     = "quant"
 DB_PASSWORD = "YOUR_DB_PASSWORD_HERE"
 DB_NAME     = "quant_data"
 
+# 新交易实例接口的访问密钥。部署时请改为强随机值，或改由环境变量
+# TRADE_RUN_API_KEY 提供；不要提交真实密钥。
+TRADE_RUN_API_KEY = "CHANGE_ME_TO_A_RANDOM_SECRET"
+
 # 回测默认参数
 DEFAULT_COMMISSION = 0.0001       # 手续费率 万一
 DEFAULT_MIN_COMMISSION = 5.0      # 单笔最低佣金 5 元（不免 5）

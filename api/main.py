@@ -15,7 +15,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from api import errors as api_errors
 from api import scheduler as sched
 from api.routes import (accounts, screen, rate, backtest, stocks, tasks,
-                        scheduler, holdings, notify, watchlist, trade_runs)
+                        scheduler, holdings, notify, watchlist, trade_runs, etfs)
 
 
 @asynccontextmanager
@@ -65,6 +65,7 @@ app.include_router(watchlist.router)
 app.include_router(trade_runs.router)
 app.include_router(trade_runs.system_router)
 app.include_router(trade_runs.dashboard_router)
+app.include_router(etfs.router)
 
 
 @app.get("/")

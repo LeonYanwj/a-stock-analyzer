@@ -1,6 +1,6 @@
 # A 股交易实例后端 API
 
-> 当前版本：`0.4.0`。服务地址：`http://<服务器地址>:8000`，交互式文档：`/docs`。
+> 当前版本：`0.5.0`。服务地址：`http://<服务器地址>:8000`，交互式文档：`/docs`。
 
 这是新前端交易概览页的接口契约。新页面应使用 `/api/trade-runs`，不要再把旧 `/api/accounts` 当成交易核心。
 
@@ -15,6 +15,8 @@
 5. 后端以该实际成交更新现金、持仓、收益和审计记录。
 
 当前未接入华泰证券 API，**不会自动向券商下单**。免费数据只用于研究和延迟观察，不能显示为可靠实时行情或自动下单信号。范围仅为 A 股主板个股（`stock`）和 ETF（`etf`）。
+
+除 `/health` 外，新交易实例和 ETF 接口都要求 `X-API-Key`。密钥只从部署环境的 `TRADE_RUN_API_KEY` 或 `config.py` 读取；未配置、缺失或错误均返回 `401`，不得提交到 Git。
 
 ## 通用约定
 
@@ -38,6 +40,8 @@
 | GET | `/api/system/data-status` | 数据与券商执行能力声明 |
 
 内置策略：`short_term`（短线，1–3 个交易日）、`medium_term`（中线，1–4 周）、`long_term`（长线，1–3 个月）。交易实例创建时会冻结版本，新增版本不改写历史。
+
+创建时必须明确选择 `signal_source`：`legacy` 为旧策略映射（短线 `short_term`、中线 `swing`、长线 `trend`），`new` 为新版规则体系；另一体系自动作为 `shadow`。主体系才产生可照抄计划和真实账务。
 
 `GET /api/system/data-status` 的关键含义：
 
@@ -77,7 +81,9 @@
   "strategy_code":"short_term",
   "capital":100000,
   "max_position_pct":0.8,
-  "asset_types":["stock","etf"]
+  "asset_types":["stock","etf"],
+  "signal_source":"legacy",
+  "plan_windows":["pre_market","midday"]
 }
 ```
 
@@ -89,13 +95,23 @@
 
 `action` 只能是 `pause` 或 `end`；`end` 后不可恢复。
 
-## 手工执行计划
+## 计划生成、主影子比较与 ETF
 
 | 方法 | 路径 | 用途 |
 |---|---|---|
-| POST | `/api/trade-runs/{run_id}/plans` | 受控策略服务创建计划；普通前端只读展示 |
+| POST | `/api/trade-runs/{run_id}/generate-plans` | 手动测试触发盘前或午间计划 |
 | GET | `/api/trade-runs/{run_id}/plans` | 计划列表 |
 | GET | `/api/trade-runs/{run_id}/plans/{plan_id}` | 单条计划与证据 |
+| GET | `/api/trade-runs/{run_id}/comparison` | 主影子重合与机会差异 |
+| GET | `/api/etfs` | ETF 搜索、类型、跟踪指数和流动性状态 |
+
+交易日调度在盘前 `08:45` 与午间 `12:45` 生成计划。同一实例、日期与窗口由数据库任务锁保证幂等；暂停、结束或删除的实例不会生成计划，失败会写入 `risk_event`。
+
+手动测试触发：
+
+```json
+{"plan_window":"pre_market","as_of":"2026-08-13T08:45:00+08:00"}
+```
 
 ```json
 {
@@ -107,7 +123,7 @@
   "min_price":10.10,
   "max_price":10.35,
   "data_status":"delayed",
-  "blocked_reason":"QUOTE_STALE",
+  "blocked_reason":null,
   "valid_from":"2026-08-13T09:30:00+08:00",
   "expires_at":"2026-08-13T10:00:00+08:00",
   "reason":"趋势和流动性条件满足；等待可信报价确认",
@@ -115,7 +131,11 @@
 }
 ```
 
-计划状态：`generated`、`eligible`、`blocked`、`partially_filled`、`triggered`、`expired`、`cancelled`。计划允许分批成交；响应中的 `filled_qty` 达到 `suggested_qty` 后才变为 `triggered`。`data_status` 不是 `fresh` 或存在 `blocked_reason` 时，后端将计划设为 `blocked`；首期免费数据通常应显示 `delayed`，不可提示用户“已可自动下单”。
+计划状态：`generated`、`eligible`、`blocked`、`partially_filled`、`triggered`、`expired`、`cancelled`。计划允许分批成交；响应中的 `filled_qty` 达到 `suggested_qty` 后才变为 `triggered`。`data_status=delayed` 可生成 `eligible` 条件计划，但会带有 `execution_confirmation_required=true`，绝不代表实时触发。`missing`、`stale`、`invalid` 或存在 `blocked_reason` 时才为 `blocked`。
+
+ETF 首版只从高流动性、上市正常且已进入白名单的宽基/行业 ETF 中筛选。主影子只有同证券同方向才是 `overlap`；主计划真实成交后仅记录镜像关联。`primary_only`、`shadow_only` 只展示机会差异，不会伪造收益或改动账务。
+
+影子计划在 `/plans` 响应中以 `signal_source` 标明，仅供展示和比较；`fills.plan_id` 只能关联主信号体系的计划。
 
 ## 实际成交回填
 
@@ -133,6 +153,8 @@
   "fee":5,
   "executed_at":"2026-08-13T09:35:00+08:00",
   "source":"manual",
+  "broker_quote_confirmed":true,
+  "quote_checked_at":"2026-08-13T09:34:30+08:00",
   "note":"华泰成交回填"
 }
 ```
@@ -140,6 +162,7 @@
 - `idempotency_key` 必填；重复发送同一个键不会重复扣款或重复记持仓。
 - 买入校验现金与创建时冻结的总仓位上限；卖出校验持仓、可卖数量和 A 股 T+1。
 - `plan_id` 可为空；若填写，代码和方向必须与计划一致。
+- 关联延迟计划时必须提交 `broker_quote_confirmed=true` 和 `quote_checked_at`；系统会保存确认和审计记录。
 - 成交、现金流水、持仓投影、计划状态和审计事件在一个数据库事务中写入。
 - 首期 `source` 只应使用 `manual`。
 
@@ -149,7 +172,7 @@
 |---|---|---|
 | GET | `/api/trade-runs/{run_id}/dashboard` | 单实例现金、持仓、计划/成交计数和最近事件 |
 | GET | `/api/trade-runs/{run_id}/positions` | 由成交派生的当前持仓，不可直接编辑 |
-| GET | `/api/trade-runs/{run_id}/performance` | 成本口径权益、收益和已实现收益 |
+| GET | `/api/trade-runs/{run_id}/performance` | 真实执行绩效、重合影子镜像状态和机会差异 |
 | GET | `/api/trade-runs/{run_id}/events?limit=50` | 最近审计时间线，`limit` 为 1–200 |
 
 没有可信实时行情时，概览的 `market_value_source` 是 `cost`，市值为成本口径；完整的实时估值、最大回撤、时点快照和匹配基准绩效属于后续 M3，当前响应会返回明确警告。
@@ -170,6 +193,6 @@
 
 ## 部署迁移与旧接口
 
-在目标 MySQL 数据库先执行 [`sql/trade_run_schema.sql`](sql/trade_run_schema.sql)。它只创建新交易实例表，不删除或改写旧 `paper_*` 表。
+在目标 MySQL 先确保基础迁移已经执行，再按版本执行 [`sql/migrations/20260813_002_signal_sources_and_etf.sql`](sql/migrations/20260813_002_signal_sources_and_etf.sql)。迁移只新增结构，不删除或改写旧 `paper_*`、行情或回测数据。
 
 旧 `/api/accounts`、`/api/screen`、`/api/backtest` 等接口暂时保留给旧功能；新前端交易实例页只使用本文档的接口。

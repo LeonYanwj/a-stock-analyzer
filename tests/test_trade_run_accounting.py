@@ -9,18 +9,19 @@ class TradeRunAccountingTests(unittest.TestCase):
     def setUp(self):
         self.service = TradeRunService(SqliteTradeRunRepository())
         self.service.repo.initialize()
-        self.run = self.service.create_run("短线验证", "short_term", 100000, 0.8, ["stock"])
+        self.run = self.service.create_run("短线验证", "short_term", 100000, 0.8, ["stock"], signal_source="legacy")
         self.service.start_run(self.run["run_id"])
 
     def plan(self, **changes):
         data = dict(ts_code="600000.SH", asset_type="stock", side="buy", suggested_qty=1000,
-                    reference_price=10, data_status="delayed", blocked_reason="免费行情非实时")
+                    reference_price=10, data_status="delayed", blocked_reason=None)
         data.update(changes)
         return self.service.create_plan(self.run["run_id"], **data)
 
     def fill(self, **changes):
         data = dict(idempotency_key="fill-1", ts_code="600000.SH", side="buy", qty=1000,
-                    price=10, fee=5, executed_at="2026-08-13T09:35:00", source="manual")
+                    price=10, fee=5, executed_at="2026-08-13T09:35:00", source="manual",
+                    broker_quote_confirmed=True, quote_checked_at="2026-08-13T09:34:00")
         data.update(changes)
         return self.service.record_fill(self.run["run_id"], **data)
 
@@ -28,7 +29,7 @@ class TradeRunAccountingTests(unittest.TestCase):
         before = self.service.dashboard(self.run["run_id"])
         plan = self.plan()
         after = self.service.dashboard(self.run["run_id"])
-        self.assertEqual(plan["status"], "blocked")
+        self.assertEqual(plan["status"], "eligible")
         self.assertEqual(before["cash"], after["cash"])
         self.assertEqual(after["positions"], [])
 
@@ -84,6 +85,12 @@ class TradeRunAccountingTests(unittest.TestCase):
             self.fill(plan_id=plan["plan_id"], qty=1100)
         self.assertEqual(ctx.exception.code, "PLAN_QTY_EXCEEDED")
 
+    def test_fill_linked_to_plan_must_stay_inside_price_range(self):
+        plan = self.plan(blocked_reason=None, min_price=9.9, max_price=10.1)
+        with self.assertRaises(TradeRunError) as ctx:
+            self.fill(plan_id=plan["plan_id"], price=10.2)
+        self.assertEqual(ctx.exception.code, "FILL_PRICE_OUT_OF_RANGE")
+
     def test_write_paths_request_account_lock(self):
         class LockTrackingRepo(SqliteTradeRunRepository):
             def __init__(self):
@@ -97,9 +104,9 @@ class TradeRunAccountingTests(unittest.TestCase):
         repo = LockTrackingRepo()
         repo.initialize()
         service = TradeRunService(repo)
-        run = service.create_run("锁验证", "short_term", 100000, 0.8, ["stock"])
+        run = service.create_run("锁验证", "short_term", 100000, 0.8, ["stock"], signal_source="legacy")
         service.start_run(run["run_id"])
-        service.record_fill(run["run_id"], idempotency_key="lock-fill", ts_code="600000.SH", side="buy", qty=1000, price=10, fee=5, executed_at="2026-08-13T09:35:00", asset_type="stock")
+        service.record_fill(run["run_id"], idempotency_key="lock-fill", ts_code="600000.SH", side="buy", qty=1000, price=10, fee=5, executed_at="2026-08-13T09:35:00", asset_type="stock", broker_quote_confirmed=True, quote_checked_at="2026-08-13T09:34:00")
         self.assertGreaterEqual(repo.lock_requests, 2)
 
     def test_rebuy_after_flat_position_starts_new_open_date(self):
@@ -112,7 +119,24 @@ class TradeRunAccountingTests(unittest.TestCase):
         self.assertEqual(position["open_date"], "2026-08-15")
 
     def test_blocked_plan_cannot_be_recorded_as_fill(self):
-        plan = self.plan()
+        plan = self.plan(data_status="missing", blocked_reason="QUOTE_MISSING")
         with self.assertRaises(TradeRunError) as ctx:
             self.fill(plan_id=plan["plan_id"])
         self.assertEqual(ctx.exception.code, "PLAN_NOT_EXECUTABLE")
+
+    def test_delayed_plan_requires_broker_quote_confirmation(self):
+        plan = self.plan(blocked_reason=None)
+        with self.assertRaises(TradeRunError) as ctx:
+            self.fill(plan_id=plan["plan_id"], broker_quote_confirmed=False, quote_checked_at=None)
+        self.assertEqual(ctx.exception.code, "BROKER_QUOTE_CONFIRMATION_REQUIRED")
+        filled = self.fill(plan_id=plan["plan_id"], broker_quote_confirmed=True,
+                           quote_checked_at="2026-08-13T09:34:30")
+        self.assertTrue(filled["fill"]["broker_quote_confirmed"])
+
+    def test_manual_fill_also_requires_broker_quote_confirmation(self):
+        with self.assertRaises(TradeRunError) as ctx:
+            self.service.record_fill(self.run["run_id"], idempotency_key="no-quote",
+                                     ts_code="600000.SH", side="buy", qty=1000, price=10,
+                                     fee=5, executed_at="2026-08-13T09:35:00", source="manual",
+                                     asset_type="stock")
+        self.assertEqual(ctx.exception.code, "BROKER_QUOTE_CONFIRMATION_REQUIRED")

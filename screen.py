@@ -170,7 +170,7 @@ def screen_market(strategy: str = "swing", capital: float = 0,
                   limit: int = 0, enable_news: bool = False,
                   refine: int = 100, news_weight: float = 0.15,
                   verbose: bool = True, return_all: bool = False,
-                  persist_ratings: bool = True) -> pd.DataFrame:
+                  persist_ratings: bool = True, as_of_dt=None) -> pd.DataFrame:
     """全市场选股核心函数（可被其他脚本调用，如 paper.py）
 
     Returns:
@@ -185,7 +185,8 @@ def screen_market(strategy: str = "swing", capital: float = 0,
     else:
         top_actual = TOP_N
 
-    asof_dt = datetime.now()
+    # 计划、回放和回测必须传入决策截面，禁止在调用链中悄悄改成当前时间。
+    asof_dt = as_of_dt or datetime.now()
     asof = asof_dt.strftime("%Y%m%d")
 
     if verbose:

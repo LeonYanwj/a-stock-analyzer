@@ -17,7 +17,7 @@ CREATE TABLE IF NOT EXISTS strategy_definition (
 CREATE TABLE IF NOT EXISTS strategy_version (
   version_id INTEGER PRIMARY KEY AUTOINCREMENT, strategy_code TEXT NOT NULL,
   version_no INTEGER NOT NULL, algorithm_fingerprint TEXT NOT NULL,
-  config_json TEXT NOT NULL, created_at TEXT NOT NULL,
+  config_json TEXT NOT NULL, signal_source TEXT NOT NULL DEFAULT 'legacy', created_at TEXT NOT NULL,
   UNIQUE(strategy_code, version_no)
 );
 CREATE TABLE IF NOT EXISTS trade_run (
@@ -26,7 +26,9 @@ CREATE TABLE IF NOT EXISTS trade_run (
   status TEXT NOT NULL, active_strategy_code TEXT UNIQUE,
   initial_capital REAL NOT NULL, current_cash REAL NOT NULL,
   max_position_pct REAL NOT NULL, asset_types_json TEXT NOT NULL,
-  frozen_config_json TEXT NOT NULL, created_at TEXT NOT NULL,
+  frozen_config_json TEXT NOT NULL, primary_signal_source TEXT NOT NULL DEFAULT 'legacy',
+  shadow_signal_source TEXT NOT NULL DEFAULT 'new', plan_windows_json TEXT NOT NULL DEFAULT '["pre_market","midday"]',
+  created_at TEXT NOT NULL,
   started_at TEXT, paused_at TEXT, ended_at TEXT, deleted_at TEXT
 );
 CREATE TABLE IF NOT EXISTS signal_plan (
@@ -35,13 +37,42 @@ CREATE TABLE IF NOT EXISTS signal_plan (
   suggested_qty INTEGER NOT NULL, reference_price REAL NOT NULL,
   min_price REAL, max_price REAL, status TEXT NOT NULL, data_status TEXT NOT NULL,
   blocked_reason TEXT, valid_from TEXT, expires_at TEXT, filled_qty INTEGER NOT NULL DEFAULT 0, reason TEXT NOT NULL,
-  evidence_json TEXT NOT NULL, created_at TEXT NOT NULL
+  evidence_json TEXT NOT NULL, signal_source TEXT NOT NULL DEFAULT 'legacy', plan_window TEXT NOT NULL DEFAULT 'manual',
+  as_of TEXT, observation_id INTEGER, execution_confirmation_required INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS execution_fill (
   fill_id INTEGER PRIMARY KEY AUTOINCREMENT, run_id INTEGER NOT NULL,
   plan_id INTEGER, idempotency_key TEXT NOT NULL UNIQUE, ts_code TEXT NOT NULL,
   side TEXT NOT NULL, qty INTEGER NOT NULL, price REAL NOT NULL, fee REAL NOT NULL,
-  executed_at TEXT NOT NULL, source TEXT NOT NULL, note TEXT, created_at TEXT NOT NULL
+  executed_at TEXT NOT NULL, source TEXT NOT NULL, note TEXT, broker_quote_confirmed INTEGER NOT NULL DEFAULT 0,
+  quote_checked_at TEXT, created_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS plan_comparison (
+  comparison_id INTEGER PRIMARY KEY AUTOINCREMENT, run_id INTEGER NOT NULL, plan_date TEXT NOT NULL, plan_window TEXT NOT NULL,
+  ts_code TEXT NOT NULL, side TEXT NOT NULL, comparison_type TEXT NOT NULL,
+  primary_plan_id INTEGER, shadow_plan_id INTEGER, mirrored_fill_id INTEGER,
+  opportunity_note TEXT, created_at TEXT NOT NULL,
+  UNIQUE(run_id, plan_date, plan_window, ts_code, side)
+);
+CREATE TABLE IF NOT EXISTS plan_generation (
+  run_id INTEGER NOT NULL, plan_window TEXT NOT NULL, plan_date TEXT NOT NULL,
+  status TEXT NOT NULL, started_at TEXT NOT NULL, completed_at TEXT, error_message TEXT,
+  PRIMARY KEY(run_id, plan_window, plan_date)
+);
+CREATE TABLE IF NOT EXISTS market_data_observation (
+  observation_id INTEGER PRIMARY KEY AUTOINCREMENT, run_id INTEGER NOT NULL, ts_code TEXT NOT NULL,
+  source TEXT NOT NULL, market_time TEXT, received_at TEXT NOT NULL, delay_seconds INTEGER,
+  completeness TEXT NOT NULL, snapshot_ref TEXT, payload_json TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS market_etf_basic (
+  ts_code TEXT PRIMARY KEY, symbol TEXT NOT NULL, name TEXT NOT NULL, etf_type TEXT,
+  tracking_index TEXT, listing_status TEXT NOT NULL DEFAULT 'active', whitelist INTEGER NOT NULL DEFAULT 0,
+  avg_amount REAL, updated_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS market_etf_daily (
+  ts_code TEXT NOT NULL, trade_date TEXT NOT NULL, open REAL, high REAL, low REAL, close REAL,
+  vol REAL, amount REAL, pct_chg REAL, PRIMARY KEY(ts_code, trade_date)
 );
 CREATE TABLE IF NOT EXISTS run_position (
   run_id INTEGER NOT NULL, ts_code TEXT NOT NULL, asset_type TEXT NOT NULL,
@@ -58,6 +89,10 @@ CREATE TABLE IF NOT EXISTS audit_event (
   event_id INTEGER PRIMARY KEY AUTOINCREMENT, run_id INTEGER NOT NULL,
   event_type TEXT NOT NULL, message TEXT NOT NULL, payload_json TEXT NOT NULL,
   created_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS risk_event (
+  risk_event_id INTEGER PRIMARY KEY AUTOINCREMENT, run_id INTEGER NOT NULL, event_code TEXT NOT NULL,
+  severity TEXT NOT NULL, message TEXT NOT NULL, payload_json TEXT NOT NULL, created_at TEXT NOT NULL
 );
 """
 
@@ -78,8 +113,12 @@ class SqliteTradeRunRepository:
         for code, name, desc, fingerprint in seeds:
             self.conn.execute("INSERT OR IGNORE INTO strategy_definition VALUES (?,?,?)", (code, name, desc))
             self.conn.execute(
-                "INSERT OR IGNORE INTO strategy_version(strategy_code,version_no,algorithm_fingerprint,config_json,created_at) VALUES (?,?,?,?,?)",
-                (code, 1, fingerprint, "{}", now),
+                "INSERT OR IGNORE INTO strategy_version(strategy_code,version_no,algorithm_fingerprint,config_json,signal_source,created_at) VALUES (?,?,?,?,?,?)",
+                (code, 1, fingerprint, "{}", "legacy", now),
+            )
+            self.conn.execute(
+                "INSERT OR IGNORE INTO strategy_version(strategy_code,version_no,algorithm_fingerprint,config_json,signal_source,created_at) VALUES (?,?,?,?,?,?)",
+                (code, 2, f"rule-{code}-v1", "{}", "new", now),
             )
         self.conn.commit()
 
@@ -106,8 +145,13 @@ class SqliteTradeRunRepository:
     def _many(cur):
         return [dict(row) for row in cur.fetchall()]
 
-    def latest_strategy_version(self, code):
-        return self._one(self.conn.execute("SELECT * FROM strategy_version WHERE strategy_code=? ORDER BY version_no DESC LIMIT 1", (code,)))
+    def latest_strategy_version(self, code, signal_source=None):
+        sql = "SELECT * FROM strategy_version WHERE strategy_code=?"
+        params = [code]
+        if signal_source:
+            sql += " AND signal_source=?"
+            params.append(signal_source)
+        return self._one(self.conn.execute(sql + " ORDER BY version_no DESC LIMIT 1", params))
 
     def list_strategies(self):
         return self._many(self.conn.execute("SELECT d.code,d.name,d.description,v.version_id,v.version_no,v.algorithm_fingerprint FROM strategy_definition d JOIN strategy_version v ON v.strategy_code=d.code WHERE v.version_no=(SELECT MAX(version_no) FROM strategy_version WHERE strategy_code=d.code) ORDER BY d.code"))
@@ -116,7 +160,7 @@ class SqliteTradeRunRepository:
         return self._many(self.conn.execute("SELECT * FROM strategy_version WHERE strategy_code=? ORDER BY version_no DESC", (code,)))
 
     def insert_run(self, values):
-        cur = self.conn.execute("INSERT INTO trade_run(name,strategy_code,strategy_version_id,status,initial_capital,current_cash,max_position_pct,asset_types_json,frozen_config_json,created_at) VALUES (?,?,?,?,?,?,?,?,?,?)", values)
+        cur = self.conn.execute("INSERT INTO trade_run(name,strategy_code,strategy_version_id,status,initial_capital,current_cash,max_position_pct,asset_types_json,frozen_config_json,primary_signal_source,shadow_signal_source,plan_windows_json,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)", values)
         return cur.lastrowid
 
     def get_run(self, run_id, include_deleted=True, for_update=False):
@@ -134,6 +178,11 @@ class SqliteTradeRunRepository:
             sql += " WHERE deleted_at IS NULL"
         return self._many(self.conn.execute(sql + " ORDER BY run_id DESC"))
 
+    def list_running_runs(self):
+        return self._many(self.conn.execute(
+            "SELECT * FROM trade_run WHERE status='running' AND deleted_at IS NULL ORDER BY run_id"
+        ))
+
     def update_run(self, run_id, **values):
         values["run_id"] = run_id
         sets = ", ".join(f"{key}=?" for key in values if key != "run_id")
@@ -143,11 +192,14 @@ class SqliteTradeRunRepository:
     def add_audit(self, run_id, event_type, message, payload=None):
         self.conn.execute("INSERT INTO audit_event(run_id,event_type,message,payload_json,created_at) VALUES (?,?,?,?,?)", (run_id, event_type, message, json.dumps(payload or {}, ensure_ascii=False), self.now()))
 
+    def add_risk_event(self, run_id, event_code, severity, message, payload=None):
+        self.conn.execute("INSERT INTO risk_event(run_id,event_code,severity,message,payload_json,created_at) VALUES (?,?,?,?,?,?)", (run_id, event_code, severity, message, json.dumps(payload or {}, ensure_ascii=False), self.now()))
+
     def list_events(self, run_id, limit=50):
         return self._many(self.conn.execute("SELECT * FROM audit_event WHERE run_id=? ORDER BY event_id DESC LIMIT ?", (run_id, limit)))
 
     def insert_plan(self, values):
-        cur = self.conn.execute("INSERT INTO signal_plan(run_id,ts_code,asset_type,side,suggested_qty,reference_price,min_price,max_price,status,data_status,blocked_reason,valid_from,expires_at,filled_qty,reason,evidence_json,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", values)
+        cur = self.conn.execute("INSERT INTO signal_plan(run_id,ts_code,asset_type,side,suggested_qty,reference_price,min_price,max_price,status,data_status,blocked_reason,valid_from,expires_at,filled_qty,reason,evidence_json,signal_source,plan_window,as_of,observation_id,execution_confirmation_required,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", values)
         return cur.lastrowid
 
     def get_plan(self, plan_id):
@@ -155,6 +207,14 @@ class SqliteTradeRunRepository:
 
     def list_plans(self, run_id):
         return self._many(self.conn.execute("SELECT * FROM signal_plan WHERE run_id=? ORDER BY plan_id DESC", (run_id,)))
+
+    def list_plans_for_window(self, run_id, signal_source, plan_window, plan_date=None):
+        sql = "SELECT * FROM signal_plan WHERE run_id=? AND signal_source=? AND plan_window=?"
+        params = [run_id, signal_source, plan_window]
+        if plan_date:
+            sql += " AND DATE(as_of)=?"
+            params.append(plan_date)
+        return self._many(self.conn.execute(sql + " ORDER BY plan_id", params))
 
     def update_plan(self, plan_id, **values):
         sets = ", ".join(f"{key}=?" for key in values)
@@ -164,7 +224,7 @@ class SqliteTradeRunRepository:
         return self._one(self.conn.execute("SELECT * FROM execution_fill WHERE idempotency_key=?", (key,)))
 
     def insert_fill(self, values):
-        cur = self.conn.execute("INSERT INTO execution_fill(run_id,plan_id,idempotency_key,ts_code,side,qty,price,fee,executed_at,source,note,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)", values)
+        cur = self.conn.execute("INSERT INTO execution_fill(run_id,plan_id,idempotency_key,ts_code,side,qty,price,fee,executed_at,source,note,broker_quote_confirmed,quote_checked_at,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)", values)
         return cur.lastrowid
 
     def list_fills(self, run_id):
@@ -192,6 +252,42 @@ class SqliteTradeRunRepository:
     def plan_counts(self, run_id):
         rows = self._many(self.conn.execute("SELECT status,COUNT(*) AS count FROM signal_plan WHERE run_id=? GROUP BY status", (run_id,)))
         return {r["status"]: r["count"] for r in rows}
+
+    def insert_observation(self, values):
+        cur = self.conn.execute(
+            "INSERT INTO market_data_observation(run_id,ts_code,source,market_time,received_at,delay_seconds,completeness,snapshot_ref,payload_json) VALUES (?,?,?,?,?,?,?,?,?)",
+            values,
+        )
+        return cur.lastrowid
+
+    def insert_comparison(self, values):
+        self.conn.execute(
+            "INSERT INTO plan_comparison(run_id,plan_date,plan_window,ts_code,side,comparison_type,primary_plan_id,shadow_plan_id,mirrored_fill_id,opportunity_note,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?) "
+            "ON CONFLICT(run_id,plan_date,plan_window,ts_code,side) DO UPDATE SET comparison_type=excluded.comparison_type,primary_plan_id=excluded.primary_plan_id,shadow_plan_id=excluded.shadow_plan_id,opportunity_note=excluded.opportunity_note",
+            values,
+        )
+
+    def mark_comparison_fill(self, primary_plan_id, fill_id):
+        self.conn.execute("UPDATE plan_comparison SET mirrored_fill_id=? WHERE primary_plan_id=? AND comparison_type='overlap'", (fill_id, primary_plan_id))
+
+    def claim_plan_generation(self, run_id, plan_window, plan_date):
+        cur = self.conn.execute(
+            "INSERT OR IGNORE INTO plan_generation(run_id,plan_window,plan_date,status,started_at) VALUES (?,?,?,?,?)",
+            (run_id, plan_window, plan_date, "processing", self.now()),
+        )
+        return bool(cur.rowcount)
+
+    def finish_plan_generation(self, run_id, plan_window, plan_date, status, error_message=None):
+        self.conn.execute("UPDATE plan_generation SET status=?, completed_at=?, error_message=? WHERE run_id=? AND plan_window=? AND plan_date=?", (status, self.now(), error_message, run_id, plan_window, plan_date))
+
+    def get_plan_generation(self, run_id, plan_window, plan_date):
+        return self._one(self.conn.execute(
+            "SELECT * FROM plan_generation WHERE run_id=? AND plan_window=? AND plan_date=?",
+            (run_id, plan_window, plan_date),
+        ))
+
+    def list_comparisons(self, run_id):
+        return self._many(self.conn.execute("SELECT * FROM plan_comparison WHERE run_id=? ORDER BY comparison_id DESC", (run_id,)))
 
     def list_all_positions(self, run_id):
         return self._many(self.conn.execute("SELECT * FROM run_position WHERE run_id=? ORDER BY ts_code", (run_id,)))
@@ -249,7 +345,8 @@ class MySqlTradeRunRepository(SqliteTradeRunRepository):
                 ("long_term", "长线", "1-3 个月低换手趋势计划", "long-v1"),
             ]:
                 self.conn.execute("INSERT IGNORE INTO strategy_definition(code,name,description) VALUES (?,?,?)", (code, name, description))
-                self.conn.execute("INSERT IGNORE INTO strategy_version(strategy_code,version_no,algorithm_fingerprint,config_json,created_at) VALUES (?,?,?,JSON_OBJECT(),?)", (code, 1, fingerprint, now))
+                self.conn.execute("INSERT IGNORE INTO strategy_version(strategy_code,version_no,algorithm_fingerprint,config_json,signal_source,created_at) VALUES (?,?,?,JSON_OBJECT(),?,?)", (code, 1, fingerprint, "legacy", now))
+                self.conn.execute("INSERT IGNORE INTO strategy_version(strategy_code,version_no,algorithm_fingerprint,config_json,signal_source,created_at) VALUES (?,?,?,JSON_OBJECT(),?,?)", (code, 2, f"rule-{code}-v1", "new", now))
 
     @contextlib.contextmanager
     def transaction(self):
@@ -267,3 +364,17 @@ class MySqlTradeRunRepository(SqliteTradeRunRepository):
             "ON DUPLICATE KEY UPDATE qty=VALUES(qty),sellable_qty=VALUES(sellable_qty),avg_cost=VALUES(avg_cost),realized_pnl=VALUES(realized_pnl),open_date=VALUES(open_date),updated_at=VALUES(updated_at)",
             values,
         )
+
+    def insert_comparison(self, values):
+        self.conn.execute(
+            "INSERT INTO plan_comparison(run_id,plan_date,plan_window,ts_code,side,comparison_type,primary_plan_id,shadow_plan_id,mirrored_fill_id,opportunity_note,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?) "
+            "ON DUPLICATE KEY UPDATE comparison_type=VALUES(comparison_type),primary_plan_id=VALUES(primary_plan_id),shadow_plan_id=VALUES(shadow_plan_id),opportunity_note=VALUES(opportunity_note)",
+            values,
+        )
+
+    def claim_plan_generation(self, run_id, plan_window, plan_date):
+        cur = self.conn.execute(
+            "INSERT IGNORE INTO plan_generation(run_id,plan_window,plan_date,status,started_at) VALUES (?,?,?,?,?)",
+            (run_id, plan_window, plan_date, "processing", self.now()),
+        )
+        return bool(cur.rowcount)

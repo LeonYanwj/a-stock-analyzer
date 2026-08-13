@@ -6,13 +6,15 @@
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, Query
+import os
+from fastapi import APIRouter, Header, Query
 from pydantic import BaseModel, Field
 
 from api.errors import APIError
 from trade_run.models import TradeRunError
 from trade_run.repository import MySqlTradeRunRepository
 from trade_run.service import TradeRunService
+from trade_run.planner import TradeRunPlanner
 
 
 router = APIRouter(prefix="/api/trade-runs", tags=["trade-runs"])
@@ -52,6 +54,9 @@ class CreateTradeRunRequest(BaseModel):
     capital: float = Field(..., gt=0)
     max_position_pct: float = Field(..., gt=0, le=1)
     asset_types: List[str] = Field(..., min_length=1)
+    signal_source: str
+    shadow_signal_source: Optional[str] = None
+    plan_windows: List[str] = Field(default_factory=lambda: ["pre_market", "midday"])
 
 
 class StopTradeRunRequest(BaseModel):
@@ -87,6 +92,31 @@ class RecordFillRequest(BaseModel):
     asset_type: Optional[str] = None
     source: str = "manual"
     note: Optional[str] = None
+    broker_quote_confirmed: bool = False
+    quote_checked_at: Optional[datetime] = None
+
+
+class GeneratePlansRequest(BaseModel):
+    plan_window: str
+    as_of: Optional[datetime] = None
+
+
+def _configured_api_key():
+    """只从环境变量或部署端 config.py 读取，不把密钥放进仓库。"""
+    key = os.getenv("TRADE_RUN_API_KEY")
+    if key:
+        return key
+    try:
+        from config import TRADE_RUN_API_KEY
+        return TRADE_RUN_API_KEY
+    except (ImportError, AttributeError):
+        return None
+
+
+def require_trade_run_api_key(x_api_key: Optional[str] = Header(None)):
+    expected = _configured_api_key()
+    if not expected or not x_api_key or x_api_key != expected:
+        raise APIError("UNAUTHORIZED", "新交易实例接口需要有效的 X-API-Key", 401)
 
 
 def _call(fn, *args, **kwargs):
@@ -96,13 +126,15 @@ def _call(fn, *args, **kwargs):
         raise APIError(exc.code, exc.message, exc.status, exc.detail)
 
 
-@router.get("/strategy-definitions")
-def list_strategy_definitions():
+@router.get("/strategy-definitions", dependencies=[])
+def list_strategy_definitions(x_api_key: Optional[str] = Header(None)):
+    require_trade_run_api_key(x_api_key)
     return get_service().repo.list_strategies()
 
 
 @router.get("/strategy-definitions/{code}/versions")
-def list_strategy_versions(code: str):
+def list_strategy_versions(code: str, x_api_key: Optional[str] = Header(None)):
+    require_trade_run_api_key(x_api_key)
     versions = get_service().repo.list_versions(code)
     if not versions:
         raise APIError("STRATEGY_NOT_FOUND", "策略不存在", 404)
@@ -110,53 +142,63 @@ def list_strategy_versions(code: str):
 
 
 @router.post("")
-def create_trade_run(body: CreateTradeRunRequest):
-    return _call(get_service().create_run, body.name, body.strategy_code, body.capital, body.max_position_pct, body.asset_types)
+def create_trade_run(body: CreateTradeRunRequest, x_api_key: Optional[str] = Header(None)):
+    require_trade_run_api_key(x_api_key)
+    return _call(get_service().create_run, body.name, body.strategy_code, body.capital, body.max_position_pct, body.asset_types, body.signal_source, body.shadow_signal_source, body.plan_windows)
 
 
 @router.get("")
-def list_trade_runs(include_deleted: bool = False):
+def list_trade_runs(include_deleted: bool = False, x_api_key: Optional[str] = Header(None)):
+    require_trade_run_api_key(x_api_key)
     return _call(get_service().list_runs, include_deleted)
 
 
 @router.get("/dashboard")
-def dashboard():
+def dashboard(x_api_key: Optional[str] = Header(None)):
+    require_trade_run_api_key(x_api_key)
     return _call(get_service().dashboard)
 
 
 @dashboard_router.get("/api/dashboard")
-def root_dashboard():
+def root_dashboard(x_api_key: Optional[str] = Header(None)):
     """前端首页的交易实例概览。"""
+    require_trade_run_api_key(x_api_key)
     return _call(get_service().dashboard)
 
 
 @router.get("/{run_id}")
-def get_trade_run(run_id: int):
+def get_trade_run(run_id: int, x_api_key: Optional[str] = Header(None)):
+    require_trade_run_api_key(x_api_key)
     return _call(get_service().get_run, run_id)
 
 
 @router.post("/{run_id}/start")
-def start_trade_run(run_id: int):
+def start_trade_run(run_id: int, x_api_key: Optional[str] = Header(None)):
+    require_trade_run_api_key(x_api_key)
     return _call(get_service().start_run, run_id)
 
 
 @router.post("/{run_id}/stop")
-def stop_trade_run(run_id: int, body: StopTradeRunRequest):
+def stop_trade_run(run_id: int, body: StopTradeRunRequest, x_api_key: Optional[str] = Header(None)):
+    require_trade_run_api_key(x_api_key)
     return _call(get_service().stop_run, run_id, body.action, body.reason)
 
 
 @router.delete("/{run_id}")
-def delete_trade_run(run_id: int):
+def delete_trade_run(run_id: int, x_api_key: Optional[str] = Header(None)):
+    require_trade_run_api_key(x_api_key)
     return _call(get_service().delete_run, run_id)
 
 
 @router.get("/{run_id}/dashboard")
-def trade_run_dashboard(run_id: int):
+def trade_run_dashboard(run_id: int, x_api_key: Optional[str] = Header(None)):
+    require_trade_run_api_key(x_api_key)
     return _call(get_service().dashboard, run_id)
 
 
 @router.post("/{run_id}/plans")
-def create_plan(run_id: int, body: CreatePlanRequest):
+def create_plan(run_id: int, body: CreatePlanRequest, x_api_key: Optional[str] = Header(None)):
+    require_trade_run_api_key(x_api_key)
     return _call(get_service().create_plan, run_id, body.ts_code, body.asset_type, body.side,
                  body.suggested_qty, body.reference_price, body.min_price, body.max_price,
                  body.data_status, body.blocked_reason,
@@ -166,43 +208,64 @@ def create_plan(run_id: int, body: CreatePlanRequest):
 
 
 @router.get("/{run_id}/plans")
-def list_plans(run_id: int):
+def list_plans(run_id: int, x_api_key: Optional[str] = Header(None)):
+    require_trade_run_api_key(x_api_key)
     return _call(get_service().list_plans, run_id)
 
 
 @router.get("/{run_id}/plans/{plan_id}")
-def get_plan(run_id: int, plan_id: int):
+def get_plan(run_id: int, plan_id: int, x_api_key: Optional[str] = Header(None)):
+    require_trade_run_api_key(x_api_key)
     return _call(get_service().get_plan, run_id, plan_id)
 
 
 @router.post("/{run_id}/fills")
-def record_fill(run_id: int, body: RecordFillRequest):
+def record_fill(run_id: int, body: RecordFillRequest, x_api_key: Optional[str] = Header(None)):
+    require_trade_run_api_key(x_api_key)
     return _call(get_service().record_fill, run_id,
                  idempotency_key=body.idempotency_key, ts_code=body.ts_code, side=body.side,
                  qty=body.qty, price=body.price, fee=body.fee,
                  executed_at=body.executed_at.isoformat(), plan_id=body.plan_id,
                  asset_type=body.asset_type,
-                 source=body.source, note=body.note)
+                 source=body.source, note=body.note,
+                 broker_quote_confirmed=body.broker_quote_confirmed,
+                 quote_checked_at=body.quote_checked_at.isoformat() if body.quote_checked_at else None)
 
 
 @router.get("/{run_id}/positions")
-def get_positions(run_id: int):
+def get_positions(run_id: int, x_api_key: Optional[str] = Header(None)):
+    require_trade_run_api_key(x_api_key)
     return _call(get_service().positions, run_id)
 
 
 @router.get("/{run_id}/performance")
-def get_performance(run_id: int):
+def get_performance(run_id: int, x_api_key: Optional[str] = Header(None)):
+    require_trade_run_api_key(x_api_key)
     return _call(get_service().performance, run_id)
 
 
 @router.get("/{run_id}/events")
-def get_events(run_id: int, limit: int = Query(50, ge=1, le=200)):
+def get_events(run_id: int, limit: int = Query(50, ge=1, le=200), x_api_key: Optional[str] = Header(None)):
+    require_trade_run_api_key(x_api_key)
     return _call(get_service().events, run_id, limit)
 
 
+@router.post("/{run_id}/generate-plans")
+def generate_plans(run_id: int, body: GeneratePlansRequest, x_api_key: Optional[str] = Header(None)):
+    require_trade_run_api_key(x_api_key)
+    return _call(TradeRunPlanner(get_service()).generate, run_id, body.plan_window, body.as_of or datetime.now())
+
+
+@router.get("/{run_id}/comparison")
+def get_comparison(run_id: int, x_api_key: Optional[str] = Header(None)):
+    require_trade_run_api_key(x_api_key)
+    return _call(get_service().comparisons, run_id)
+
+
 @system_router.get("/data-status")
-def data_status():
+def data_status(x_api_key: Optional[str] = Header(None)):
     """首期的数据能力声明，避免把免费/延迟数据误认为实时可下单行情。"""
+    require_trade_run_api_key(x_api_key)
     configured = _service is not None
     return {
         "trading_mode": "manual_fill",

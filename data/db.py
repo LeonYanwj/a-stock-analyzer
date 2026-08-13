@@ -167,6 +167,23 @@ def get_active_stocks(conn, only_main_board: bool = True) -> pd.DataFrame:
 
 
 # ----------------------------------------------------------------------
+# ETF：人工实盘验证首版
+# ----------------------------------------------------------------------
+def upsert_etf_basic(conn, df: pd.DataFrame) -> int:
+    """写入 ETF 基础信息。白名单由人工维护/审核，抓取不应自动放开交易池。"""
+    cols = [c for c in ["ts_code", "symbol", "name", "etf_type", "tracking_index",
+                        "listing_status", "whitelist", "avg_amount"] if c in df.columns]
+    return upsert_df(conn, "market_etf_basic", df[cols])
+
+
+def upsert_etf_daily(conn, df: pd.DataFrame) -> int:
+    """写入 ETF 未复权研究日线，不覆盖个股 market_daily。"""
+    cols = [c for c in ["ts_code", "trade_date", "open", "high", "low", "close",
+                        "vol", "amount", "pct_chg"] if c in df.columns]
+    return upsert_df(conn, "market_etf_daily", df[cols])
+
+
+# ----------------------------------------------------------------------
 # strategy_config：策略配置
 # ----------------------------------------------------------------------
 def get_strategy(conn, name: str) -> dict:

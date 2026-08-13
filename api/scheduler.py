@@ -63,6 +63,32 @@ _last_watchlist = {
     "reason": None,
 }
 
+_last_trade_run_plans = {"status": "never", "time": None, "window": None, "runs": 0, "detail": ""}
+
+
+def run_trade_run_plans(plan_window, now=None):
+    """为运行中的新交易实例生成指定窗口计划；失败必须落风险事件。"""
+    from api.routes.trade_runs import get_service
+    from trade_run.planner import TradeRunPlanner
+    now = now or datetime.now()
+    if not is_trade_day(now.date()):
+        _last_trade_run_plans.update(status="skip", time=now.isoformat(), window=plan_window, runs=0, detail="非交易日")
+        return
+    try:
+        service = get_service()
+        planner = TradeRunPlanner(service)
+        processed = 0
+        for run in service.repo.list_running_runs():
+            try:
+                planner.generate(run["run_id"], plan_window, now)
+                processed += 1
+            except Exception:
+                traceback.print_exc()
+        _last_trade_run_plans.update(status="ok", time=now.isoformat(), window=plan_window, runs=processed, detail="已尝试生成运行中实例计划")
+    except Exception as exc:
+        _last_trade_run_plans.update(status="error", time=now.isoformat(), window=plan_window, runs=0, detail=f"{type(exc).__name__}: {exc}")
+        traceback.print_exc()
+
 
 def refresh_quotes_for_active_positions(trade_date=None) -> int:
     """更新所有活跃账户持仓股的日线到最新（写回 market_daily）
@@ -104,6 +130,31 @@ def refresh_quotes_for_active_positions(trade_date=None) -> int:
     return n
 
 
+def refresh_whitelisted_etf_daily(trade_date=None) -> int:
+    """收盘后更新 ETF 白名单日线，供下一个交易日的计划使用。"""
+    from data.db import get_conn
+    from data.fetcher import DataFetcher
+    end = trade_date or date.today()
+    start = end - timedelta(days=35)
+    try:
+        with get_conn() as conn:
+            cur = conn.cursor()
+            cur.execute("SELECT ts_code FROM market_etf_basic WHERE listing_status='active' AND whitelist=1")
+            codes = [row[0] for row in cur.fetchall()]
+            cur.close()
+    except Exception as exc:
+        print(f"  [warn] ETF 白名单读取失败: {type(exc).__name__}: {exc}")
+        return 0
+    fetcher, updated = DataFetcher(), 0
+    for code in codes:
+        try:
+            if not fetcher.get_etf_daily(code, start, end).empty:
+                updated += 1
+        except Exception as exc:
+            print(f"  [warn] ETF 日线更新失败 {code}: {type(exc).__name__}: {exc}")
+    return updated
+
+
 def run_daily_job(trade_date=None):
     """调度主任务：先更新行情，再跑 daily_runner。失败不抛出（记录到状态）。"""
     import daily_runner
@@ -120,6 +171,7 @@ def run_daily_job(trade_date=None):
                      finished_at=None, detail="更新持仓股行情中...")
     try:
         n = refresh_quotes_for_active_positions(trade_date)
+        etf_count = refresh_whitelisted_etf_daily(trade_date)
         _last_run["quotes_updated"] = n
         _last_run["detail"] = f"行情更新 {n} 只，正在跑 daily_runner..."
 
@@ -127,7 +179,7 @@ def run_daily_job(trade_date=None):
 
         _last_run.update(
             status="ok", finished_at=datetime.now().isoformat(),
-            detail=f"完成：更新 {n} 只持仓股行情 + 全部活跃账户 daily_runner")
+            detail=f"完成：更新 {n} 只持仓股行情、{etf_count} 只 ETF 日线 + 全部活跃账户 daily_runner")
     except Exception as e:
         _last_run.update(status="error", finished_at=datetime.now().isoformat(),
                          detail=f"{type(e).__name__}: {e}")
@@ -261,6 +313,7 @@ def get_status() -> dict:
             "cron": "mon-fri 19:00 (Asia/Shanghai)",
             "last_run": dict(_last_watchlist),
         },
+        "trade_run_plans": dict(_last_trade_run_plans),
     }
 
 
@@ -276,6 +329,18 @@ def start_scheduler():
         max_instances=1,        # 不允许重叠运行（上一轮没跑完就跳过本轮）
         coalesce=True,          # 错过多次只补跑一次
         misfire_grace_time=3600,  # 进程晚启动 1 小时内仍补跑
+    )
+    scheduler.add_job(
+        lambda: run_trade_run_plans("pre_market"),
+        CronTrigger(day_of_week="mon-fri", hour=8, minute=45),
+        id="trade_run_pre_market_job", name="交易实例盘前计划", max_instances=1,
+        coalesce=True, misfire_grace_time=15 * 60,
+    )
+    scheduler.add_job(
+        lambda: run_trade_run_plans("midday"),
+        CronTrigger(day_of_week="mon-fri", hour=12, minute=45),
+        id="trade_run_midday_job", name="交易实例午间计划", max_instances=1,
+        coalesce=True, misfire_grace_time=15 * 60,
     )
     # 盘中监控：交易日 9-15 点每 10 分钟触发，job 内部精确校验交易时段
     scheduler.add_job(
