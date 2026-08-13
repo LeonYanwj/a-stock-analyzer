@@ -29,3 +29,8 @@ config.py
 *.bak
 *.bak.py
 fetcher_tushare.py.bak
+
+# Codex 本地协作记录（不属于项目交付物）
+.superpowers/
+AGENTS.md
+MEMORY.md
