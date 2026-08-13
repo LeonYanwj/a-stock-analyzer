@@ -19,6 +19,13 @@ DB_NAME     = "quant_data"
 # TRADE_RUN_API_KEY 提供；不要提交真实密钥。
 TRADE_RUN_API_KEY = "CHANGE_ME_TO_A_RANDOM_SECRET"
 
+# 管理后台会话签名密钥；部署时设置为与 API Key 不同的随机值。
+# 可用环境变量 TRADE_RUN_SESSION_SECRET 覆盖；不要提交真实密钥。
+TRADE_RUN_SESSION_SECRET = "CHANGE_ME_TO_ANOTHER_RANDOM_SECRET"
+
+# 生产 HTTPS 站点设为 True，本地 Vite 联调保留 False。
+TRADE_RUN_COOKIE_SECURE = False
+
 # 回测默认参数
 DEFAULT_COMMISSION = 0.0001       # 手续费率 万一
 DEFAULT_MIN_COMMISSION = 5.0      # 单笔最低佣金 5 元（不免 5）

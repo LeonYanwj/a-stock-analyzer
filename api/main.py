@@ -14,6 +14,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from api import errors as api_errors
 from api import scheduler as sched
+from api import auth
 from api.routes import (accounts, screen, rate, backtest, stocks, tasks,
                         scheduler, holdings, notify, watchlist, trade_runs, etfs)
 
@@ -62,6 +63,7 @@ app.include_router(scheduler.router)
 app.include_router(holdings.router)
 app.include_router(notify.router)
 app.include_router(watchlist.router)
+app.include_router(auth.router)
 app.include_router(trade_runs.router)
 app.include_router(trade_runs.system_router)
 app.include_router(trade_runs.dashboard_router)

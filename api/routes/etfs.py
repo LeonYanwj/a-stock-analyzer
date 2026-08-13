@@ -1,7 +1,7 @@
 """ETF 白名单与流动性状态查询；不提供自动下单。"""
 from typing import Optional
 
-from fastapi import APIRouter, Header, Query
+from fastapi import APIRouter, Header, Query, Request
 from api.errors import APIError
 from api.routes.trade_runs import require_trade_run_api_key
 from data.db import get_conn
@@ -11,10 +11,10 @@ router = APIRouter(prefix="/api/etfs", tags=["etfs"])
 
 
 @router.get("")
-def list_etfs(search: Optional[str] = None, etf_type: Optional[str] = None,
+def list_etfs(request: Request, search: Optional[str] = None, etf_type: Optional[str] = None,
               whitelist_only: bool = True, limit: int = Query(200, ge=1, le=500),
               x_api_key: Optional[str] = Header(None)):
-    require_trade_run_api_key(x_api_key)
+    require_trade_run_api_key(request, x_api_key)
     sql = "SELECT ts_code,symbol,name,etf_type,tracking_index,listing_status,whitelist,avg_amount,updated_at FROM market_etf_basic"
     conditions, params = ["listing_status='active'"], []
     if whitelist_only:

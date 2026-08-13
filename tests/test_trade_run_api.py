@@ -22,6 +22,8 @@ from trade_run.service import TradeRunService
 class TradeRunApiTests(unittest.TestCase):
     def setUp(self):
         os.environ["TRADE_RUN_API_KEY"] = "test-key"
+        os.environ["TRADE_RUN_SESSION_SECRET"] = "test-session-secret"
+        os.environ["TRADE_RUN_COOKIE_SECURE"] = "false"
         repo = SqliteTradeRunRepository()
         repo.initialize()
         configure_service(TradeRunService(repo))
@@ -62,3 +64,28 @@ class TradeRunApiTests(unittest.TestCase):
         response = self.client.get("/api/trade-runs")
         self.assertEqual(response.status_code, 401)
         self.assertEqual(response.json()["error"], "UNAUTHORIZED")
+
+    def test_api_key_can_be_exchanged_for_eight_hour_session(self):
+        response = self.client.post("/api/auth/session", json={"api_key": "test-key"})
+        self.assertEqual(response.status_code, 200)
+        body = response.json()
+        self.assertTrue(body["authenticated"])
+        self.assertGreater(body["expires_at"], 0)
+        self.assertIn("HttpOnly", response.headers["set-cookie"])
+        self.assertIn("Max-Age=28800", response.headers["set-cookie"])
+
+        dashboard = self.client.get("/api/dashboard")
+        self.assertEqual(dashboard.status_code, 200)
+        self.assertEqual(self.client.get("/api/auth/session").json()["authenticated"], True)
+
+        logout = self.client.delete("/api/auth/session")
+        self.assertEqual(logout.status_code, 200)
+        self.assertFalse(self.client.get("/api/auth/session").json()["authenticated"])
+        self.assertEqual(self.client.get("/api/dashboard").status_code, 401)
+
+    def test_session_login_rejects_wrong_api_key_and_api_key_remains_compatible(self):
+        self.assertEqual(
+            self.client.post("/api/auth/session", json={"api_key": "wrong"}).status_code,
+            401,
+        )
+        self.assertEqual(self.client.get("/api/dashboard", headers=self.headers).status_code, 200)
