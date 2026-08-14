@@ -1,8 +1,69 @@
+import threading
 import unittest
 
 from trade_run.models import TradeRunError
-from trade_run.repository import SqliteTradeRunRepository
+from trade_run.repository import SqliteTradeRunRepository, _MySqlConnectionAdapter
 from trade_run.service import TradeRunService
+
+
+class _FakeMySqlCursor:
+    def __init__(self, connection):
+        self.connection = connection
+
+    def execute(self, sql, params=()):
+        self.connection.executed_on_threads.append(threading.get_ident())
+
+
+class _FakeMySqlConnection:
+    def __init__(self):
+        self.executed_on_threads = []
+        self.ping_reconnect_values = []
+
+    def ping(self, reconnect=False):
+        self.ping_reconnect_values.append(reconnect)
+
+    def cursor(self):
+        return _FakeMySqlCursor(self)
+
+
+class MySqlConnectionAdapterTests(unittest.TestCase):
+    def test_each_worker_thread_gets_its_own_reconnectable_connection(self):
+        connections = []
+        connections_lock = threading.Lock()
+        start = threading.Barrier(2)
+
+        def create_connection():
+            connection = _FakeMySqlConnection()
+            with connections_lock:
+                connections.append(connection)
+            return connection
+
+        adapter = _MySqlConnectionAdapter(connection_factory=create_connection)
+
+        def run_query():
+            start.wait(timeout=2)
+            return adapter.execute("SELECT 1").connection
+
+        results = []
+        errors = []
+
+        def collect():
+            try:
+                results.append(run_query())
+            except Exception as exc:  # pragma: no cover - assertion below reports it
+                errors.append(exc)
+
+        threads = [threading.Thread(target=collect) for _ in range(2)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=2)
+
+        self.assertFalse(errors)
+        self.assertEqual(2, len(results))
+        self.assertEqual(2, len({id(connection) for connection in results}))
+        self.assertEqual(2, len(connections))
+        self.assertTrue(all(connection.ping_reconnect_values == [True] for connection in connections))
 
 
 class TradeRunStateTests(unittest.TestCase):

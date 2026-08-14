@@ -7,6 +7,7 @@
 import contextlib
 import json
 import sqlite3
+import threading
 from datetime import datetime
 
 
@@ -294,24 +295,80 @@ class SqliteTradeRunRepository:
 
 
 class _MySqlConnectionAdapter:
-    """把 PyMySQL 连接适配为本仓储所需的最小 DB-API 表面。"""
+    """为每个工作线程维护独立的 PyMySQL 连接。
 
-    def __init__(self, conn):
-        self.raw = conn
+    FastAPI 会把同步路由分派给线程池。PyMySQL 连接不是线程安全的，不能把
+    单条连接作为进程级单例共享，否则并发查询会交叉读写 MySQL 协议包。
+    """
+
+    def __init__(self, connection=None, connection_factory=None):
+        if connection is None and connection_factory is None:
+            raise ValueError("必须提供 MySQL 连接或连接工厂")
+        self._connection_factory = connection_factory
+        self._bootstrap_connection = connection
+        self._bootstrap_lock = threading.Lock()
+        self._bootstrap_claimed = False
+        self._local = threading.local()
+
+    def _connection(self):
+        connection = getattr(self._local, "connection", None)
+        if connection is not None:
+            return connection
+
+        if self._connection_factory is not None:
+            connection = self._connection_factory()
+        else:
+            # 仅保留给显式注入连接的兼容路径；生产配置必须传入工厂，才能让
+            # 每个 FastAPI 工作线程获得独立连接。
+            with self._bootstrap_lock:
+                if self._bootstrap_claimed:
+                    raise RuntimeError("共享 MySQL 连接不能跨线程使用；请提供 connection_factory")
+                connection = self._bootstrap_connection
+                self._bootstrap_claimed = True
+
+        self._local.connection = connection
+        self._local.in_transaction = False
+        return connection
+
+    def _ping_if_safe(self, connection):
+        # 事务中若连接中断，应让调用方整体回滚，不能悄悄重连到新事务。
+        if not getattr(self._local, "in_transaction", False):
+            connection.ping(reconnect=True)
 
     def execute(self, sql, params=()):
-        cur = self.raw.cursor()
+        connection = self._connection()
+        self._ping_if_safe(connection)
+        cur = connection.cursor()
         cur.execute(sql.replace("?", "%s"), params)
         return cur
 
     def commit(self):
-        self.raw.commit()
+        try:
+            self._connection().commit()
+        finally:
+            self._local.in_transaction = False
 
     def rollback(self):
-        self.raw.rollback()
+        try:
+            self._connection().rollback()
+        finally:
+            self._local.in_transaction = False
 
     def begin(self):
-        self.raw.begin()
+        connection = self._connection()
+        self._ping_if_safe(connection)
+        connection.begin()
+        self._local.in_transaction = True
+
+    def close_current_thread(self):
+        """关闭当前线程持有的连接，供进程退出或受控工作线程清理使用。"""
+        connection = getattr(self._local, "connection", None)
+        if connection is not None:
+            try:
+                connection.close()
+            finally:
+                self._local.connection = None
+                self._local.in_transaction = False
 
 
 class MySqlTradeRunRepository(SqliteTradeRunRepository):
@@ -321,19 +378,25 @@ class MySqlTradeRunRepository(SqliteTradeRunRepository):
     `sql/trade_run_schema.sql`。测试仍应使用 SQLite 仓储，避免触碰业务库。
     """
 
-    def __init__(self, connection):
-        self.conn = _MySqlConnectionAdapter(connection)
+    def __init__(self, connection=None, connection_factory=None):
+        self.conn = _MySqlConnectionAdapter(connection, connection_factory)
 
     @classmethod
     def from_config(cls):
         import pymysql
         from config import DB_HOST, DB_PORT, DB_USER, DB_PASSWORD, DB_NAME
-        conn = pymysql.connect(
-            host=DB_HOST, port=DB_PORT, user=DB_USER, password=DB_PASSWORD,
-            database=DB_NAME, charset="utf8mb4", autocommit=False,
-            cursorclass=pymysql.cursors.DictCursor, connect_timeout=10,
-        )
-        return cls(conn)
+        connection_options = {
+            "host": DB_HOST,
+            "port": DB_PORT,
+            "user": DB_USER,
+            "password": DB_PASSWORD,
+            "database": DB_NAME,
+            "charset": "utf8mb4",
+            "autocommit": False,
+            "cursorclass": pymysql.cursors.DictCursor,
+            "connect_timeout": 10,
+        }
+        return cls(connection_factory=lambda: pymysql.connect(**connection_options))
 
     def initialize(self):
         """不建表；只在确认已迁移后确保策略种子存在。"""
