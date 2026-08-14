@@ -272,6 +272,15 @@ class SqliteTradeRunRepository:
         self.conn.execute("UPDATE plan_comparison SET mirrored_fill_id=? WHERE primary_plan_id=? AND comparison_type='overlap'", (fill_id, primary_plan_id))
 
     def claim_plan_generation(self, run_id, plan_window, plan_date):
+        # 已失败的窗口可以在修复数据或代码后由用户显式重试；运行中/已完成
+        # 的窗口仍不能重复占用。
+        retried = self.conn.execute(
+            "UPDATE plan_generation SET status='processing', started_at=?, completed_at=NULL, error_message=NULL "
+            "WHERE run_id=? AND plan_window=? AND plan_date=? AND status='failed'",
+            (self.now(), run_id, plan_window, plan_date),
+        )
+        if retried.rowcount:
+            return True
         cur = self.conn.execute(
             "INSERT OR IGNORE INTO plan_generation(run_id,plan_window,plan_date,status,started_at) VALUES (?,?,?,?,?)",
             (run_id, plan_window, plan_date, "processing", self.now()),
@@ -436,6 +445,13 @@ class MySqlTradeRunRepository(SqliteTradeRunRepository):
         )
 
     def claim_plan_generation(self, run_id, plan_window, plan_date):
+        retried = self.conn.execute(
+            "UPDATE plan_generation SET status='processing', started_at=?, completed_at=NULL, error_message=NULL "
+            "WHERE run_id=? AND plan_window=? AND plan_date=? AND status='failed'",
+            (self.now(), run_id, plan_window, plan_date),
+        )
+        if retried.rowcount:
+            return True
         cur = self.conn.execute(
             "INSERT IGNORE INTO plan_generation(run_id,plan_window,plan_date,status,started_at) VALUES (?,?,?,?,?)",
             (run_id, plan_window, plan_date, "processing", self.now()),

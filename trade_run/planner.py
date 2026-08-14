@@ -51,6 +51,14 @@ class TradeRunPlanner:
                 self.repo.add_audit(run_id, "PLAN_GENERATION_FAILED", "计划生成失败", {"window": plan_window})
                 self.repo.finish_plan_generation(run_id, plan_window, plan_date, "failed", str(exc)[:500])
             raise TradeRunError("PLAN_GENERATION_FAILED", "计划生成失败，已写入风险事件", 503, str(exc)[:200])
+        # 候选生成可能比用户的暂停操作耗时更久。落库前必须重新读取运行状态，
+        # 不能让已暂停/结束的实例在后台任务返回后继续产生可执行计划。
+        latest_run = self.service._require_run(run_id)
+        if latest_run["status"] != RunStatus.RUNNING.value or latest_run["deleted_at"] is not None:
+            with self.repo.transaction():
+                self.repo.add_audit(run_id, "PLAN_GENERATION_CANCELLED", "交易实例已停止，丢弃未落库计划", {"window": plan_window})
+                self.repo.finish_plan_generation(run_id, plan_window, plan_date, "cancelled", "交易实例已停止")
+            raise TradeRunError("PLAN_GENERATION_CANCELLED", "交易实例已停止，未生成新计划", 409)
         primary_plans = self._persist(run, primary_rows, primary, plan_window, as_of)
         shadow_plans = self._persist(run, shadow_rows, shadow, plan_window, as_of)
         self._compare(run_id, plan_date, plan_window, primary_plans, shadow_plans)

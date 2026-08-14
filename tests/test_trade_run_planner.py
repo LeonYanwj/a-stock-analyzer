@@ -80,6 +80,42 @@ class TradeRunPlannerTests(unittest.TestCase):
         events = self.service.repo._many(self.service.repo.conn.execute("SELECT * FROM risk_event"))
         self.assertEqual(events[0]["event_code"], "PLAN_GENERATION_FAILED")
 
+    def test_failed_window_can_be_retried_after_fix(self):
+        class BrokenProvider:
+            def candidates(self, *args):
+                raise RuntimeError("data unavailable")
+
+        with self.assertRaises(Exception):
+            TradeRunPlanner(self.service, {"legacy": BrokenProvider(), "new": BrokenProvider()}).generate(
+                self.run["run_id"], "midday", self.as_of
+            )
+        recovered = TradeRunPlanner(self.service, {
+            "legacy": FixedProvider([self.row("600000.SH")]),
+            "new": FixedProvider([self.row("600519.SH")]),
+        }).generate(self.run["run_id"], "midday", self.as_of)
+        self.assertFalse(recovered["idempotent"])
+        self.assertEqual(len(self.service.list_plans(self.run["run_id"])), 2)
+
+    def test_pause_during_generation_discards_candidates(self):
+        service = self.service
+        candidate = self.row("600000.SH")
+
+        class PausingProvider:
+            def candidates(self, *args):
+                service.stop_run(self.run_id, "pause", "验收暂停")
+                return [candidate]
+
+            def __init__(self, run_id):
+                self.run_id = run_id
+
+        planner = TradeRunPlanner(self.service, {
+            "legacy": PausingProvider(self.run["run_id"]), "new": FixedProvider([self.row("600519.SH")]),
+        })
+        with self.assertRaises(Exception) as ctx:
+            planner.generate(self.run["run_id"], "midday", self.as_of)
+        self.assertEqual(ctx.exception.code, "PLAN_GENERATION_CANCELLED")
+        self.assertEqual(self.service.list_plans(self.run["run_id"]), [])
+
     def test_empty_window_is_idempotent(self):
         planner = TradeRunPlanner(self.service, {
             "legacy": FixedProvider([]), "new": FixedProvider([]),
