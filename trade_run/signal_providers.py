@@ -63,14 +63,18 @@ class RuleSignalProvider:
         # MySQL 8/MariaDB 10.11 的窗口函数；截面条件是防未来数据泄漏的硬边界。
         source = table
         fields = "ts_code, close, amount, pct_chg"
+        params = []
         if asset_type == "stock":
             source = (
                 "market_daily d JOIN market_stock_basic b ON b.ts_code=d.ts_code "
-                "AND b.is_active=1 AND b.is_st=0 AND (b.symbol LIKE '600%' OR b.symbol LIKE '601%' "
-                "OR b.symbol LIKE '603%' OR b.symbol LIKE '605%' OR b.symbol LIKE '000%' "
-                "OR b.symbol LIKE '001%' OR b.symbol LIKE '002%')"
+                "AND b.is_active=1 AND b.is_st=0 AND (b.symbol LIKE ? OR b.symbol LIKE ? "
+                "OR b.symbol LIKE ? OR b.symbol LIKE ? OR b.symbol LIKE ? "
+                "OR b.symbol LIKE ? OR b.symbol LIKE ?)"
             )
             fields = "d.ts_code, d.close, d.amount, d.pct_chg"
+            # 通配符作为绑定值，而不是 SQL 文本的一部分。PyMySQL 会对 SQL 使用
+            # `%` 参数化；若直接写 `LIKE '600%'` 会被误当成格式化占位符。
+            params.extend(("600%", "601%", "603%", "605%", "000%", "001%", "002%"))
         sql = (
             "SELECT ts_code, close, amount, pct_chg FROM ("
             f"SELECT {fields}, ROW_NUMBER() OVER (PARTITION BY ts_code ORDER BY trade_date DESC) rn "
@@ -80,7 +84,7 @@ class RuleSignalProvider:
             # 两个自动窗口都在收盘前，日线只能截止到前一自然日；周末会自然
             # 落到最近一个已存在交易日。这是防止收盘数据回写盘中计划的硬边界。
             cutoff_date = (as_of.date() - timedelta(days=1)).isoformat()
-            cur = self.repository.conn.execute(sql, (cutoff_date,))
+            cur = self.repository.conn.execute(sql, tuple(params + [cutoff_date]))
             raw = cur.fetchall()
         except Exception as exc:
             raise SignalProviderError(f"读取 {table} 失败: {type(exc).__name__}: {exc}")

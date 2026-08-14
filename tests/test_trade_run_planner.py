@@ -95,7 +95,7 @@ class TradeRunPlannerTests(unittest.TestCase):
         class QueryRepo:
             class Connection:
                 def execute(self, sql, params):
-                    captured.append(params[0])
+                    captured.append((sql, params))
                     class Cursor:
                         def fetchall(self):
                             return []
@@ -105,4 +105,6 @@ class TradeRunPlannerTests(unittest.TestCase):
         from trade_run.signal_providers import RuleSignalProvider
         provider = RuleSignalProvider(QueryRepo())
         provider._daily_candidates("market_daily", "stock", self.as_of, 10)
-        self.assertEqual(captured, ["2026-08-12"])
+        sql, params = captured[0]
+        self.assertNotIn("LIKE '600%'", sql)
+        self.assertEqual(params, ("600%", "601%", "603%", "605%", "000%", "001%", "002%", "2026-08-12"))
