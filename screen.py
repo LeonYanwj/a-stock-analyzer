@@ -37,7 +37,8 @@ _BASE_MARKET_CACHE = {}
 _BASE_CACHE_TTL_SECONDS = 15 * 60
 
 
-def fetch_history_panel(fetcher: DataFetcher, ts_codes, start, end) -> pd.DataFrame:
+def fetch_history_panel(fetcher: DataFetcher, ts_codes, start, end,
+                        progress_callback=None) -> pd.DataFrame:
     """批量查库，只有缺失或行情未更新的股票才逐只调用外部接口。"""
     frames, fail = [], 0
     ts_codes = list(dict.fromkeys(ts_codes))
@@ -46,6 +47,8 @@ def fetch_history_panel(fetcher: DataFetcher, ts_codes, start, end) -> pd.DataFr
     start_sql = pd.to_datetime(start).date()
     end_sql = pd.to_datetime(end).date()
 
+    if progress_callback:
+        progress_callback(15, "检查本地行情覆盖")
     db_panel = pd.DataFrame()
     try:
         from data.db import get_conn
@@ -80,6 +83,11 @@ def fetch_history_panel(fetcher: DataFetcher, ts_codes, start, end) -> pd.DataFr
         print(f"  [db] 行情完整 {len(usable)} 只，需增量获取 {len(missing)} 只")
 
     total = len(missing)
+    if progress_callback:
+        if total:
+            progress_callback(25, f"需补齐 {total} 只股票的历史日线")
+        else:
+            progress_callback(85, "历史日线已由本地数据覆盖")
     t0 = time.time()
     for i, ts_code in enumerate(missing, 1):
         df = fetcher.get_daily(ts_code, start, end)
@@ -93,16 +101,21 @@ def fetch_history_panel(fetcher: DataFetcher, ts_codes, start, end) -> pd.DataFr
             eta = (total - i) / rate if rate > 0 else 0
             print(f"  [{i}/{total}]  耗时 {elapsed:.0f}s  ETA {eta:.0f}s  失败 {fail}",
                   flush=True)
+        if progress_callback and (i % 20 == 0 or i == total):
+            progress_callback(25 + int(i / total * 60),
+                              f"获取历史日线：{i}/{total}，失败 {fail}")
         if API_SLEEP > 0:
             time.sleep(API_SLEEP)
     if not frames:
         raise RuntimeError("没有拉到任何历史数据")
     panel = pd.concat(frames, ignore_index=True)
+    if progress_callback:
+        progress_callback(90, "历史日线已就绪")
     return panel.drop_duplicates(["ts_code", "trade_date"], keep="last")
 
 
 def build_market_factors(asof_dt, lookback: int, limit: int = 0,
-                         verbose: bool = True):
+                         verbose: bool = True, progress_callback=None):
     """拉取一次全市场基础数据并计算策略无关的原始因子。"""
     asof = asof_dt.strftime("%Y%m%d")
     cache_key = (asof, int(lookback), int(limit))
@@ -110,9 +123,13 @@ def build_market_factors(asof_dt, lookback: int, limit: int = 0,
     if cached and time.time() - cached["cached_at"] <= _BASE_CACHE_TTL_SECONDS:
         if verbose:
             print("  复用本次运行的全市场基础因子缓存")
+        if progress_callback:
+            progress_callback(90, "复用全市场基础因子缓存")
         return (cached["fetcher"], cached["universe"].copy(),
                 cached["factors"].copy(), cached["effective_date"])
 
+    if progress_callback:
+        progress_callback(5, "加载主板股票池与基础财务数据")
     fetcher = DataFetcher()
     start = (asof_dt - timedelta(days=lookback + 30)).strftime("%Y%m%d")
     universe = get_universe(
@@ -128,6 +145,8 @@ def build_market_factors(asof_dt, lookback: int, limit: int = 0,
     if verbose:
         print(f"  股票池: {len(universe)} 只（财务高风险剔除 {excluded_financial} 只）")
 
+    if progress_callback:
+        progress_callback(10, "读取行情快照、资金流与量能数据")
     spot = fetcher.get_market_snapshot()
     fund_flow = fetcher.get_fund_flow_snapshot(window="5日排行")
     lxsz_df = fetcher.get_stock_rank_lxsz()
@@ -135,7 +154,8 @@ def build_market_factors(asof_dt, lookback: int, limit: int = 0,
         print(f"  financial: {len(fin_df)} 只覆盖")
     if verbose:
         print(f"  拉取 {len(universe)} 只股票 {lookback}+ 天日线...")
-    panel = fetch_history_panel(fetcher, universe["ts_code"].tolist(), start, asof)
+    panel = fetch_history_panel(fetcher, universe["ts_code"].tolist(), start, asof,
+                                progress_callback=progress_callback)
 
     spot_cols = [c for c in ["ts_code", "pe_ttm", "pb", "total_mv", "circ_mv"]
                  if c in spot.columns]
@@ -152,6 +172,8 @@ def build_market_factors(asof_dt, lookback: int, limit: int = 0,
                     if c in fin_df.columns]
         panel = panel.merge(fin_df[fin_cols], on="ts_code", how="left")
 
+    if progress_callback:
+        progress_callback(92, "计算多因子评分输入")
     factors = compute_all_factors(panel, asof_date=asof)
     # 外部行情完全缺失的股票也保留一条 N/A 评级，便于追踪数据覆盖问题。
     factors = factors.reindex(universe["ts_code"].tolist())
@@ -170,7 +192,8 @@ def screen_market(strategy: str = "swing", capital: float = 0,
                   limit: int = 0, enable_news: bool = False,
                   refine: int = 100, news_weight: float = 0.15,
                   verbose: bool = True, return_all: bool = False,
-                  persist_ratings: bool = True, as_of_dt=None) -> pd.DataFrame:
+                  persist_ratings: bool = True, as_of_dt=None,
+                  progress_callback=None) -> pd.DataFrame:
     """全市场选股核心函数（可被其他脚本调用，如 paper.py）
 
     Returns:
@@ -193,7 +216,10 @@ def screen_market(strategy: str = "swing", capital: float = 0,
         print(f"[screen] strategy={strategy}, top={top_actual}, 截面日={asof}")
 
     fetcher, universe, factors, effective_date = build_market_factors(
-        asof_dt, lookback=lookback, limit=limit, verbose=verbose)
+        asof_dt, lookback=lookback, limit=limit, verbose=verbose,
+        progress_callback=progress_callback)
+    if progress_callback:
+        progress_callback(95, "按策略权重计算排名")
     weights = get_factor_weights(strategy)
     scored = score(factors, weights=weights)
     risk_cols = ["ts_code", "financial_risk_level", "financial_risk_flags"]
@@ -234,8 +260,13 @@ def screen_market(strategy: str = "swing", capital: float = 0,
                 print(f"  [warn] 评级快照保存失败: {type(e).__name__}: {e}")
 
     if return_all:
+        if progress_callback:
+            progress_callback(100, "市场扫描候选池已生成")
         return snapshot
-    return top_n(snapshot, n=top_actual)
+    result = top_n(snapshot, n=top_actual)
+    if progress_callback:
+        progress_callback(100, "市场扫描候选池已生成")
+    return result
 
 
 def main():

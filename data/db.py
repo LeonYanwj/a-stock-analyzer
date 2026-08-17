@@ -340,8 +340,8 @@ def insert_api_task(conn, task_dict: dict) -> None:
 
 def list_api_tasks(conn, name: str = None, status: str = None,
                    limit: int = 30) -> pd.DataFrame:
-    """列出归档任务（不含 result/params/traceback 大字段，只看清单）"""
-    sql = ("SELECT task_id, name, status, progress_msg, error, "
+    """列出归档任务（不含 result/traceback；保留 params 供业务任务关联筛选）"""
+    sql = ("SELECT task_id, name, status, progress_msg, params, error, "
            "created_at, started_at, finished_at, duration_seconds "
            "FROM api_task_history WHERE 1=1")
     params = []

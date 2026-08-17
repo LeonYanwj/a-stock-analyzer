@@ -105,6 +105,50 @@
 | GET | `/api/trade-runs/{run_id}/comparison` | 主影子重合与机会差异 |
 | GET | `/api/etfs` | ETF 搜索、类型、跟踪指数和流动性状态 |
 
+### 市场扫描后台任务
+
+市场扫描是“在冻结的策略、资产范围和数据截面上生成候选池”的只读步骤。它**不会**创建
+交易计划、扣减现金或修改持仓。页面提交后立即得到一条任务记录；随后通过任务详情轮询
+`status`、`progress` 和 `progress_msg`，任务完成后读取候选池结果。
+
+| 方法 | 路径 | 用途 |
+|---|---|---|
+| POST | `/api/trade-runs/{run_id}/market-scans` | 提交后台市场扫描，立即返回 `task_id` |
+| GET | `/api/trade-runs/{run_id}/market-scans` | 当前实例的扫描任务记录（进行中 + 已归档） |
+| GET | `/api/trade-runs/{run_id}/market-scans/{task_id}` | 单条任务进度及完成后的候选池 |
+
+提交请求：
+
+```json
+{
+  "plan_window":"pre_market",
+  "as_of":"2026-08-17T08:45:00+08:00"
+}
+```
+
+立即响应示例：
+
+```json
+{
+  "task_id":"8ed6d4f7-...",
+  "status":"running",
+  "task":{"name":"market_scan","progress":5,"progress_msg":"校验交易实例与扫描窗口"},
+  "tip":"轮询 GET /api/trade-runs/12/market-scans/8ed6d4f7-... 查看进度"
+}
+```
+
+任务详情中的状态为 `pending`、`running`、`done` 或 `failed`。`running` 阶段会依次报告
+策略/窗口校验、执行策略扫描、股票池与历史行情加载、因子计算和候选整理。
+任务详情同时返回 `progress_events` 时间线；页面可以在任务未完成时展示已经完成的阶段，
+而不是只能显示最后一条进度文案。
+完成时 `result` 返回 `candidates`；候选含入选理由、分数、
+数据截面、数据状态、参考价和建议价格区间。`candidate_status=blocked` 的行只用于解释，
+不得进入交易计划。
+
+扫描要求交易实例已经是 `running` 且启用了对应窗口；这只是允许扫描使用该实例冻结的资金
+和资产范围，**不表示自动买入**。候选池需经用户确认后，才可调用计划生成接口形成待人工
+执行的计划。
+
 交易日调度在盘前 `08:45` 与午间 `12:45` 生成计划。同一实例、日期与窗口由数据库任务锁保证幂等；暂停、结束或删除的实例不会生成计划，失败会写入 `risk_event`。
 
 手动测试触发：

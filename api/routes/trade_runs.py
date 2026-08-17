@@ -15,6 +15,9 @@ from trade_run.models import TradeRunError
 from trade_run.repository import MySqlTradeRunRepository
 from trade_run.service import TradeRunService
 from trade_run.planner import TradeRunPlanner
+from trade_run.market_scan import (get_market_scan_task, list_market_scan_tasks,
+                                   submit_market_scan)
+from api import tasks as task_mgr
 
 
 router = APIRouter(prefix="/api/trade-runs", tags=["trade-runs"])
@@ -97,6 +100,11 @@ class RecordFillRequest(BaseModel):
 
 
 class GeneratePlansRequest(BaseModel):
+    plan_window: str
+    as_of: Optional[datetime] = None
+
+
+class MarketScanRequest(BaseModel):
     plan_window: str
     as_of: Optional[datetime] = None
 
@@ -241,6 +249,50 @@ def get_events(run_id: int, request: Request, limit: int = Query(50, ge=1, le=20
 def generate_plans(run_id: int, body: GeneratePlansRequest, request: Request, x_api_key: Optional[str] = Header(None)):
     require_trade_run_api_key(request, x_api_key)
     return _call(TradeRunPlanner(get_service()).generate, run_id, body.plan_window, body.as_of or datetime.now())
+
+
+@router.post("/{run_id}/market-scans")
+def submit_scan(run_id: int, body: MarketScanRequest, request: Request,
+                x_api_key: Optional[str] = Header(None)):
+    """提交一次后台市场扫描。
+
+    接口立即返回 ``task_id``。前端随后轮询本模块的任务详情接口，可持续展示
+    ``pending/running/done/failed``、0-100 进度和当前阶段；扫描结果仅为候选池，
+    不会生成交易计划或改动任何账务。
+    """
+    require_trade_run_api_key(request, x_api_key)
+    try:
+        task = submit_market_scan(task_mgr, get_service(), run_id, body.plan_window,
+                                  body.as_of or datetime.now())
+    except TradeRunError as exc:
+        raise APIError(exc.code, exc.message, exc.status, exc.detail)
+    return {
+        "task_id": task.task_id,
+        "status": task.status,
+        "task": task.to_dict(include_result=False),
+        "tip": f"轮询 GET /api/trade-runs/{run_id}/market-scans/{task.task_id} 查看进度",
+    }
+
+
+@router.get("/{run_id}/market-scans")
+def list_scans(run_id: int, request: Request, limit: int = Query(30, ge=1, le=100),
+               x_api_key: Optional[str] = Header(None)):
+    """列出当前交易实例的市场扫描任务记录。"""
+    require_trade_run_api_key(request, x_api_key)
+    _call(get_service().get_run, run_id)
+    return list_market_scan_tasks(task_mgr, run_id, limit)
+
+
+@router.get("/{run_id}/market-scans/{task_id}")
+def get_scan(run_id: int, task_id: str, request: Request,
+             x_api_key: Optional[str] = Header(None)):
+    """查询市场扫描任务的实时进度和完成后的候选池结果。"""
+    require_trade_run_api_key(request, x_api_key)
+    _call(get_service().get_run, run_id)
+    task = get_market_scan_task(task_mgr, run_id, task_id)
+    if task is None:
+        raise APIError("MARKET_SCAN_TASK_NOT_FOUND", "该交易实例下不存在此市场扫描任务", 404)
+    return task
 
 
 @router.get("/{run_id}/comparison")

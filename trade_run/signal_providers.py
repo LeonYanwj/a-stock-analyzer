@@ -20,14 +20,17 @@ class LegacySignalProvider:
     def __init__(self, repository=None):
         self.repository = repository
 
-    def candidates(self, run, as_of, asset_types):
+    def candidates(self, run, as_of, asset_types, progress_callback=None):
         """把旧主板选股结果转换为只读候选；显式传 as_of，避免未来数据泄漏。"""
         rows = []
         if "stock" in asset_types:
             from screen import screen_market
+            if progress_callback:
+                progress_callback(5, "加载旧体系股票因子")
             result = screen_market(
                 strategy=LEGACY_PROFILE[run["strategy_code"]], top_n_arg=10,
                 as_of_dt=as_of, verbose=False, persist_ratings=False,
+                progress_callback=progress_callback,
             )
             for ts_code, item in result.iterrows():
                 price = float(item.get("close") or item.get("last_close") or 0)
@@ -38,7 +41,10 @@ class LegacySignalProvider:
                              "reason": "旧体系多因子排名入选", "data_status": "delayed",
                              "data_source": "legacy_screen", "market_time": as_of})
         if "etf" in asset_types:
-            rows.extend(EtfSignalProvider(self.repository).candidates(run, as_of, asset_types))
+            if progress_callback:
+                progress_callback(95, "扫描 ETF 白名单")
+            rows.extend(EtfSignalProvider(self.repository).candidates(
+                run, as_of, asset_types, progress_callback=progress_callback))
         return rows
 
 
@@ -48,15 +54,22 @@ class RuleSignalProvider:
     def __init__(self, repository=None):
         self.repository = repository
 
-    def candidates(self, run, as_of, asset_types):
+    def candidates(self, run, as_of, asset_types, progress_callback=None):
         """首版规则体系：只用 <= as_of 的日线做趋势、动量和流动性过滤。"""
         if not self.repository:
             raise SignalProviderError("新规则体系未配置数据仓储")
         rows = []
         if "stock" in asset_types:
+            if progress_callback:
+                progress_callback(20, "读取股票日线并计算趋势")
             rows.extend(self._daily_candidates("market_daily", "stock", as_of, 10))
         if "etf" in asset_types:
-            rows.extend(EtfSignalProvider(self.repository).candidates(run, as_of, asset_types))
+            if progress_callback:
+                progress_callback(70, "读取 ETF 日线与白名单")
+            rows.extend(EtfSignalProvider(self.repository).candidates(
+                run, as_of, asset_types, progress_callback=progress_callback))
+        if progress_callback:
+            progress_callback(100, "新规则候选已整理")
         return rows
 
     def _daily_candidates(self, table, asset_type, as_of, limit):
@@ -114,12 +127,14 @@ class RuleSignalProvider:
 class EtfSignalProvider(RuleSignalProvider):
     source = "etf"
 
-    def candidates(self, run, as_of, asset_types):
+    def candidates(self, run, as_of, asset_types, progress_callback=None):
         if "etf" not in asset_types:
             return []
         if not self.repository:
             # Legacy provider has no repo injection: use no ETF rather than silently invent candidates.
             return []
+        if progress_callback:
+            progress_callback(80, "计算 ETF 趋势、动量与流动性")
         candidates = self._daily_candidates("market_etf_daily", "etf", as_of, 20)
         try:
             cur = self.repository.conn.execute(
@@ -128,5 +143,8 @@ class EtfSignalProvider(RuleSignalProvider):
             allowed = {r["ts_code"] if isinstance(r, dict) else r[0]: dict(r) if not isinstance(r, dict) else r for r in cur.fetchall()}
         except Exception as exc:
             raise SignalProviderError(f"读取 ETF 白名单失败: {type(exc).__name__}: {exc}")
-        return [dict(item, reason=f"{item['reason']}；ETF 白名单", etf_meta=allowed[item["ts_code"]])
-                for item in candidates if item["ts_code"] in allowed]
+        output = [dict(item, reason=f"{item['reason']}；ETF 白名单", etf_meta=allowed[item["ts_code"]])
+                  for item in candidates if item["ts_code"] in allowed]
+        if progress_callback:
+            progress_callback(100, f"ETF 白名单匹配完成：{len(output)} 个候选")
+        return output

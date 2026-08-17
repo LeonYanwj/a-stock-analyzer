@@ -41,6 +41,7 @@ class Task:
         self.started_at: Optional[datetime] = None
         self.finished_at: Optional[datetime] = None
         self.params: dict = params or {}        # 入参快照（用于 DB 归档 + 复盘）
+        self.progress_events: list = []        # 当前进程内的阶段时间线，供详情页展示
         self._fn = fn
         self._args = args
         self._kwargs = kwargs or {}
@@ -51,11 +52,16 @@ class Task:
         self.progress = max(0, min(100, progress))
         if msg:
             self.progress_msg = msg
+            self.progress_events.append({
+                "progress": self.progress,
+                "message": msg,
+                "at": datetime.now().isoformat(),
+            })
 
     def start(self):
         self.status = "running"
         self.started_at = datetime.now()
-        self.progress_msg = "started"
+        self.report(0, "任务已进入后台队列")
         self._thread = threading.Thread(target=self._run, daemon=True)
         self._thread.start()
 
@@ -137,6 +143,7 @@ class Task:
         }
         if include_result:
             d["result"] = self.result
+        d["progress_events"] = list(self.progress_events)
         if include_traceback and self.traceback:
             d["traceback"] = self.traceback
         return d
@@ -196,6 +203,11 @@ def list_history(name: str = None, status: str = None, limit: int = 30) -> list:
         rows = []
         for _, r in df.iterrows():
             d = r.to_dict()
+            if d.get("params") and isinstance(d["params"], str):
+                try:
+                    d["params"] = json.loads(d["params"])
+                except json.JSONDecodeError:
+                    pass
             for k in ("created_at", "started_at", "finished_at"):
                 if d.get(k) is not None and hasattr(d[k], "isoformat"):
                     d[k] = d[k].isoformat()
