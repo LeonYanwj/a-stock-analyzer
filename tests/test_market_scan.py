@@ -3,7 +3,6 @@
 市场扫描只产生可解释的候选池；它不能创建交易计划或修改交易实例账务。
 这些测试不依赖 FastAPI、MySQL 或外部行情。
 """
-import json
 import unittest
 from datetime import datetime
 
@@ -34,22 +33,7 @@ class _Provider:
 
 
 class _Service:
-    def __init__(self, status="running"):
-        self.run = {
-            "run_id": 7,
-            "status": status,
-            "deleted_at": None,
-            "strategy_code": "medium_term",
-            "asset_types_json": json.dumps(["stock", "etf"]),
-            "primary_signal_source": "legacy",
-            "shadow_signal_source": "new",
-            "plan_windows_json": json.dumps(["pre_market", "midday"]),
-        }
-
-    def _require_run(self, run_id):
-        if run_id != 7:
-            raise TradeRunError("TRADE_RUN_NOT_FOUND", "交易实例不存在", 404)
-        return self.run
+    pass
 
 
 class _SubmittedTask:
@@ -58,7 +42,7 @@ class _SubmittedTask:
 
     def to_dict(self, include_result=False):
         return {"task_id": self.task_id, "name": "market_scan", "status": self.status,
-                "params": {"run_id": 7}, "from_db": False}
+                "params": {"strategy_code": "medium_term"}, "from_db": False}
 
 
 class _TaskManager:
@@ -96,11 +80,12 @@ class MarketScanTests(unittest.TestCase):
         task = _ProgressRecorder()
 
         result = run_market_scan(
-            task, _Service(), 7, "pre_market", datetime(2026, 8, 17, 8, 45),
+            task, _Service(), "medium_term", ["stock", "etf"], "pre_market",
+            datetime(2026, 8, 17, 8, 45),
             providers={"legacy": legacy, "new": unused},
         )
 
-        self.assertEqual(result["run_id"], 7)
+        self.assertEqual(result["strategy_code"], "medium_term")
         self.assertEqual(result["candidate_count"], 1)
         self.assertEqual(result["candidates"][0]["candidate_status"], "eligible")
         self.assertTrue(result["candidates"][0]["execution_confirmation_required"])
@@ -110,42 +95,46 @@ class MarketScanTests(unittest.TestCase):
         self.assertEqual(unused.calls, [])
         self.assertEqual(task.reports[-1][0], 95)
 
-    def test_scan_requires_a_running_trade_run_and_enabled_window(self):
-        with self.assertRaisesRegex(TradeRunError, "只有运行中的交易实例"):
+    def test_scan_validates_strategy_assets_and_window_without_a_trade_run(self):
+        with self.assertRaisesRegex(TradeRunError, "不支持的策略代码"):
             run_market_scan(
-                _ProgressRecorder(), _Service(status="paused"), 7, "pre_market",
+                _ProgressRecorder(), _Service(), "invalid", ["stock"], "pre_market",
                 datetime(2026, 8, 17, 8, 45), providers={},
             )
 
-        service = _Service()
-        service.run["plan_windows_json"] = json.dumps(["midday"])
-        with self.assertRaisesRegex(TradeRunError, "未启用"):
+        with self.assertRaisesRegex(TradeRunError, "资产范围"):
             run_market_scan(
-                _ProgressRecorder(), service, 7, "pre_market",
+                _ProgressRecorder(), _Service(), "medium_term", [], "pre_market",
                 datetime(2026, 8, 17, 8, 45), providers={},
             )
 
-    def test_submit_and_task_history_are_bound_to_one_trade_run(self):
+        with self.assertRaisesRegex(TradeRunError, "仅支持"):
+            run_market_scan(
+                _ProgressRecorder(), _Service(), "medium_term", ["stock"], "manual",
+                datetime(2026, 8, 17, 8, 45), providers={},
+            )
+
+    def test_submit_and_task_history_are_independent_of_a_trade_run(self):
         manager = _TaskManager()
         submitted = submit_market_scan(
-            manager, _Service(), 7, "pre_market", datetime(2026, 8, 17, 8, 45),
+            manager, _Service(), "medium_term", ["stock", "etf"], "pre_market",
+            datetime(2026, 8, 17, 8, 45),
         )
         self.assertEqual(submitted.task_id, "scan-task-1")
         self.assertEqual(manager.submitted["name"], "market_scan")
-        self.assertEqual(manager.submitted["params"]["run_id"], 7)
+        self.assertNotIn("run_id", manager.submitted["params"])
+        self.assertEqual(manager.submitted["params"]["strategy_code"], "medium_term")
         self.assertEqual(manager.submitted["params"]["as_of"], "2026-08-17T08:45:00")
 
         manager.memory = [_SubmittedTask()]
         manager.history = [
             {"task_id": "scan-task-old", "name": "market_scan", "status": "done",
-             "params": {"run_id": 7}, "created_at": "2026-08-16T08:45:00", "from_db": True},
-            {"task_id": "scan-task-other", "name": "market_scan", "status": "done",
-             "params": {"run_id": 8}, "created_at": "2026-08-16T08:45:00", "from_db": True},
+             "params": {"strategy_code": "short_term"}, "created_at": "2026-08-16T08:45:00", "from_db": True},
         ]
-        rows = list_market_scan_tasks(manager, 7)
+        rows = list_market_scan_tasks(manager)
         self.assertEqual({row["task_id"] for row in rows}, {"scan-task-1", "scan-task-old"})
-        self.assertEqual(get_market_scan_task(manager, 7, "scan-task-1")["task_id"], "scan-task-1")
-        self.assertIsNone(get_market_scan_task(manager, 8, "scan-task-1"))
+        self.assertEqual(get_market_scan_task(manager, "scan-task-1")["task_id"], "scan-task-1")
+        self.assertIsNone(get_market_scan_task(manager, "missing"))
 
     def test_task_detail_keeps_a_progress_timeline_while_running(self):
         task = Task("market_scan", lambda: None, params={"run_id": 7})

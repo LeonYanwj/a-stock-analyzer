@@ -16,7 +16,7 @@ from api import errors as api_errors
 from api import scheduler as sched
 from api import auth
 from api.routes import (accounts, screen, rate, backtest, stocks, tasks,
-                        scheduler, holdings, notify, watchlist, trade_runs, etfs)
+                        scheduler, holdings, notify, watchlist, trade_runs, etfs, market_scans)
 
 
 @asynccontextmanager
@@ -68,6 +68,7 @@ app.include_router(trade_runs.router)
 app.include_router(trade_runs.system_router)
 app.include_router(trade_runs.dashboard_router)
 app.include_router(etfs.router)
+app.include_router(market_scans.router)
 
 
 @app.get("/")
@@ -88,6 +89,7 @@ def root():
             "notify":    "/api/notify/config (SMTP配置) + POST /test 测试邮件",
             "watchlist": "/api/watchlist (自选股) + POST /report/async 每日汇总",
             "trade_runs": "/api/trade-runs（新交易实例：计划、手工成交回填、持仓与概览）",
+            "market_scans": "/api/market-scans（独立市场扫描：后台任务、进度与候选池）",
         }
     }
 

@@ -107,20 +107,23 @@
 
 ### 市场扫描后台任务
 
-市场扫描是“在冻结的策略、资产范围和数据截面上生成候选池”的只读步骤。它**不会**创建
-交易计划、扣减现金或修改持仓。页面提交后立即得到一条任务记录；随后通过任务详情轮询
-`status`、`progress` 和 `progress_msg`，任务完成后读取候选池结果。
+市场扫描是“以明确选择的策略、资产范围和数据截面生成候选池”的独立只读步骤。它**不会**
+读取交易实例状态，不要求启动交易，也不会创建交易计划、扣减现金或修改持仓。页面提交后
+立即得到一条任务记录；随后通过任务详情轮询 `status`、`progress` 和 `progress_msg`，任务
+完成后读取候选池结果。
 
 | 方法 | 路径 | 用途 |
 |---|---|---|
-| POST | `/api/trade-runs/{run_id}/market-scans` | 提交后台市场扫描，立即返回 `task_id` |
-| GET | `/api/trade-runs/{run_id}/market-scans` | 当前实例的扫描任务记录（进行中 + 已归档） |
-| GET | `/api/trade-runs/{run_id}/market-scans/{task_id}` | 单条任务进度及完成后的候选池 |
+| POST | `/api/market-scans` | 提交后台市场扫描，立即返回 `task_id` |
+| GET | `/api/market-scans` | 市场扫描任务记录（进行中 + 已归档） |
+| GET | `/api/market-scans/{task_id}` | 单条任务进度及完成后的候选池 |
 
 提交请求：
 
 ```json
 {
+  "strategy_code":"medium_term",
+  "asset_types":["stock","etf"],
   "plan_window":"pre_market",
   "as_of":"2026-08-17T08:45:00+08:00"
 }
@@ -132,8 +135,8 @@
 {
   "task_id":"8ed6d4f7-...",
   "status":"running",
-  "task":{"name":"market_scan","progress":5,"progress_msg":"校验交易实例与扫描窗口"},
-  "tip":"轮询 GET /api/trade-runs/12/market-scans/8ed6d4f7-... 查看进度"
+  "task":{"name":"market_scan","progress":5,"progress_msg":"校验扫描策略、资产范围与窗口"},
+  "tip":"轮询 GET /api/market-scans/8ed6d4f7-... 查看进度"
 }
 ```
 
@@ -145,9 +148,8 @@
 数据截面、数据状态、参考价和建议价格区间。`candidate_status=blocked` 的行只用于解释，
 不得进入交易计划。
 
-扫描要求交易实例已经是 `running` 且启用了对应窗口；这只是允许扫描使用该实例冻结的资金
-和资产范围，**不表示自动买入**。候选池需经用户确认后，才可调用计划生成接口形成待人工
-执行的计划。
+扫描与交易实例完全解耦，**不表示自动买入**。候选池需经用户确认，再在后续流程中选择
+关联的交易实例，才能形成待人工执行的计划。
 
 交易日调度在盘前 `08:45` 与午间 `12:45` 生成计划。同一实例、日期与窗口由数据库任务锁保证幂等；暂停、结束或删除的实例不会生成计划，失败会写入 `risk_event`。
 

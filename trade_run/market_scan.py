@@ -1,14 +1,14 @@
-"""交易实例的市场扫描。
+"""独立市场扫描。
 
-扫描是只读的研究步骤：给定一个运行中的交易实例、扫描窗口和数据截面，调用当前
-执行策略并返回可解释的候选池。它不创建 ``signal_plan``，不改动现金、持仓或交易
-实例状态；将候选转为计划仍由独立的确认动作负责。
+扫描是只读的研究步骤：给定策略、资产范围、扫描窗口和数据截面，返回可解释的候选池。
+它不要求交易实例处于 running，不创建 ``signal_plan``，不改动现金或持仓；将候选转为
+计划仍由独立的确认动作负责。
 """
 import json
 from datetime import datetime
 from typing import Any, Dict, Optional
 
-from .models import RunStatus, TradeRunError, require
+from .models import ASSET_TYPES, STRATEGY_CODES, TradeRunError, require
 from .planner import WINDOWS, TradeRunPlanner
 from .signal_providers import SignalProviderError
 
@@ -16,47 +16,50 @@ from .signal_providers import SignalProviderError
 _BLOCKED_DATA_STATUSES = {"missing", "stale", "invalid"}
 
 
-def submit_market_scan(task_manager, service, run_id: int, plan_window: str,
-                       as_of: Optional[datetime] = None):
+EXECUTION_SIGNAL_SOURCE = "legacy"
+
+
+def submit_market_scan(task_manager, service, strategy_code: str, asset_types: list,
+                       plan_window: str, as_of: Optional[datetime] = None):
     """提交后台扫描任务，并返回底层通用任务对象。"""
     as_of = as_of or datetime.now()
-    run = _validate_scan_request(service, run_id, plan_window)
+    asset_types = _validate_scan_request(strategy_code, asset_types, plan_window)
     params = {
-        "run_id": run_id,
         "task_type": "market_scan",
         "plan_window": plan_window,
         "as_of": as_of.isoformat(),
-        "strategy_code": run["strategy_code"],
-        "asset_types": json.loads(run["asset_types_json"]),
+        "strategy_code": strategy_code,
+        "asset_types": asset_types,
     }
     return task_manager.submit(
-        "market_scan", run_market_scan, service, run_id, plan_window, as_of,
+        "market_scan", run_market_scan, service, strategy_code, asset_types, plan_window, as_of,
         params=params,
     )
 
 
-def run_market_scan(task, service, run_id: int, plan_window: str,
+def run_market_scan(task, service, strategy_code: str, asset_types: list, plan_window: str,
                     as_of: datetime, providers: Optional[Dict[str, Any]] = None) -> dict:
     """执行一次只读扫描，并通过 ``task.report`` 汇报阶段进度。"""
-    task.report(5, "校验交易实例与扫描窗口")
-    run = _validate_scan_request(service, run_id, plan_window)
-    asset_types = set(json.loads(run["asset_types_json"]))
+    task.report(5, "校验扫描策略、资产范围与窗口")
+    asset_types = _validate_scan_request(strategy_code, asset_types, plan_window)
+    run = {
+        "strategy_code": strategy_code,
+        "asset_types_json": json.dumps(asset_types),
+    }
     providers = providers or TradeRunPlanner(service).providers
 
-    signal_source = run["primary_signal_source"]
     task.report(15, f"读取冻结策略与数据截面：{as_of.isoformat()}")
     rows = _scan_source(
-        task, providers, signal_source, run, as_of, asset_types, 20, 90, "执行策略",
+        task, providers, EXECUTION_SIGNAL_SOURCE, run, as_of, set(asset_types), 20, 90, "执行策略",
     )
     task.report(92, "整理候选池与数据状态")
 
     candidates = [_serialize_candidate(row, as_of) for row in rows]
     result = {
-        "run_id": run_id,
         "plan_window": plan_window,
         "as_of": as_of.isoformat(),
         "strategy_code": run["strategy_code"],
-        "asset_types": sorted(asset_types),
+        "asset_types": asset_types,
         "trading_mode": "manual_fill",
         "quote_reliability": "not_realtime",
         "message": "扫描结果仅为候选池；确认后才能生成交易计划，实际成交仍需人工确认券商报价并回填。",
@@ -67,41 +70,34 @@ def run_market_scan(task, service, run_id: int, plan_window: str,
     return result
 
 
-def list_market_scan_tasks(task_manager, run_id: int, limit: int = 30) -> list:
-    """列出一个交易实例的扫描任务（当前进程任务 + 已归档历史）。"""
+def list_market_scan_tasks(task_manager, limit: int = 30) -> list:
+    """列出独立市场扫描任务（当前进程任务 + 已归档历史）。"""
     rows = [t.to_dict(include_result=False)
             for t in task_manager.list_tasks(limit=limit * 2, name_filter="market_scan")]
     rows.extend(task_manager.list_history(name="market_scan", limit=limit * 2))
     unique = {}
     for row in rows:
-        params = row.get("params") or {}
-        if str(params.get("run_id")) != str(run_id):
-            continue
         task_id = row.get("task_id")
         if task_id not in unique or not unique[task_id].get("from_db", False):
             unique[task_id] = row
     return sorted(unique.values(), key=lambda x: x.get("created_at") or "", reverse=True)[:limit]
 
 
-def get_market_scan_task(task_manager, run_id: int, task_id: str) -> Optional[dict]:
-    """读取单个扫描任务，并确保它属于请求中的交易实例。"""
+def get_market_scan_task(task_manager, task_id: str) -> Optional[dict]:
+    """读取单个独立市场扫描任务。"""
     task = task_manager.get_or_db(task_id)
     if not task or task.get("name") != "market_scan":
-        return None
-    params = task.get("params") or {}
-    if str(params.get("run_id")) != str(run_id):
         return None
     return task
 
 
-def _validate_scan_request(service, run_id: int, plan_window: str) -> dict:
+def _validate_scan_request(strategy_code: str, asset_types: list, plan_window: str) -> list:
+    require(strategy_code in STRATEGY_CODES, "UNKNOWN_STRATEGY", "不支持的策略代码")
     require(plan_window in WINDOWS, "INVALID_PLAN_WINDOW", "市场扫描仅支持 pre_market 或 midday")
-    run = service._require_run(run_id)
-    require(run["deleted_at"] is None and run["status"] == RunStatus.RUNNING.value,
-            "RUN_NOT_RUNNING", "只有运行中的交易实例可以扫描市场", 409)
-    enabled_windows = set(json.loads(run["plan_windows_json"]))
-    require(plan_window in enabled_windows, "PLAN_WINDOW_DISABLED", "该交易实例未启用此扫描窗口", 409)
-    return run
+    normalized = sorted(set(asset_types or []))
+    require(bool(normalized) and set(normalized) <= ASSET_TYPES,
+            "INVALID_ASSET_TYPES", "扫描资产范围仅支持 stock 和 etf")
+    return normalized
 
 
 def _scan_source(task, providers, source: str, run: dict, as_of: datetime,
