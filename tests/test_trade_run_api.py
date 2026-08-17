@@ -8,6 +8,7 @@ import os
 
 try:
     from fastapi.testclient import TestClient
+    from api import auth
     from api.routes.trade_runs import configure_service
     from api.main import app
     FASTAPI_AVAILABLE = True
@@ -16,6 +17,7 @@ except ImportError:
 
 from trade_run.repository import SqliteTradeRunRepository
 from trade_run.service import TradeRunService
+from api.passwords import hash_password
 
 
 @unittest.skipUnless(FASTAPI_AVAILABLE, "当前解释器未安装 FastAPI/Pydantic")
@@ -27,8 +29,14 @@ class TradeRunApiTests(unittest.TestCase):
         repo = SqliteTradeRunRepository()
         repo.initialize()
         configure_service(TradeRunService(repo))
+        self.original_password_hash_loader = auth.load_admin_password_hash
+        password_hash = hash_password("test-password")
+        auth.load_admin_password_hash = lambda username: password_hash if username == "admin" else None
         self.client = TestClient(app)
         self.headers = {"X-API-Key": "test-key"}
+
+    def tearDown(self):
+        auth.load_admin_password_hash = self.original_password_hash_loader
 
     def test_create_start_fill_and_dashboard_contract(self):
         created = self.client.post("/api/trade-runs", headers=self.headers, json={
@@ -60,13 +68,15 @@ class TradeRunApiTests(unittest.TestCase):
         self.assertEqual(response.status_code, 409)
         self.assertEqual(response.json()["error"], "TRADE_RUN_DELETED")
 
-    def test_trade_run_endpoints_require_api_key(self):
+    def test_trade_run_endpoints_require_authentication(self):
         response = self.client.get("/api/trade-runs")
         self.assertEqual(response.status_code, 401)
         self.assertEqual(response.json()["error"], "UNAUTHORIZED")
 
-    def test_api_key_can_be_exchanged_for_eight_hour_session(self):
-        response = self.client.post("/api/auth/session", json={"api_key": "test-key"})
+    def test_username_and_password_can_be_exchanged_for_eight_hour_session(self):
+        response = self.client.post("/api/auth/session", json={
+            "username": "admin", "password": "test-password",
+        })
         self.assertEqual(response.status_code, 200)
         body = response.json()
         self.assertTrue(body["authenticated"])
@@ -83,9 +93,11 @@ class TradeRunApiTests(unittest.TestCase):
         self.assertFalse(self.client.get("/api/auth/session").json()["authenticated"])
         self.assertEqual(self.client.get("/api/dashboard").status_code, 401)
 
-    def test_session_login_rejects_wrong_api_key_and_api_key_remains_compatible(self):
+    def test_session_login_rejects_wrong_password_and_api_key_remains_compatible(self):
         self.assertEqual(
-            self.client.post("/api/auth/session", json={"api_key": "wrong"}).status_code,
+            self.client.post("/api/auth/session", json={
+                "username": "admin", "password": "wrong",
+            }).status_code,
             401,
         )
         self.assertEqual(self.client.get("/api/dashboard", headers=self.headers).status_code, 200)

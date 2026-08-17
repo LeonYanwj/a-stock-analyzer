@@ -1,6 +1,6 @@
 """交易管理后台的单管理员会话认证。
 
-浏览器只在登录时提交一次 TRADE_RUN_API_KEY；之后使用签名、短期的
+浏览器只在登录时提交固定管理员用户名和密码；之后使用签名、短期的
 HttpOnly Cookie。保留 X-API-Key，供调度器和受控脚本继续调用交易接口。
 """
 import base64
@@ -15,6 +15,7 @@ from fastapi import APIRouter, Header, Request, Response
 from pydantic import BaseModel, Field
 
 from api.errors import APIError
+from api.passwords import verify_password
 
 
 SESSION_COOKIE_NAME = "quant_trade_session"
@@ -23,7 +24,8 @@ router = APIRouter(prefix="/api/auth", tags=["auth"])
 
 
 class SessionLoginRequest(BaseModel):
-    api_key: str = Field(..., min_length=1, max_length=512)
+    username: str = Field(..., min_length=1, max_length=128)
+    password: str = Field(..., min_length=1, max_length=512)
 
 
 def _config_value(name):
@@ -94,11 +96,32 @@ def require_trade_run_access(request: Request, x_api_key: str | None = None):
     raise APIError("UNAUTHORIZED", "交易管理后台需要有效登录会话或 X-API-Key", 401)
 
 
+def load_admin_password_hash(username: str):
+    """从管理员账户表读取密码哈希；不向浏览器泄露数据库错误细节。"""
+    try:
+        from data.db import get_conn
+        with get_conn() as conn:
+            cur = conn.cursor()
+            try:
+                cur.execute(
+                    "SELECT password_hash FROM admin_user WHERE username=%s LIMIT 1",
+                    (username,),
+                )
+                row = cur.fetchone()
+                return row[0] if row else None
+            finally:
+                cur.close()
+    except APIError:
+        raise
+    except Exception as exc:
+        raise APIError("LOGIN_STORAGE_UNAVAILABLE", "管理员账户服务暂不可用", 503) from exc
+
+
 @router.post("/session")
 def create_session(body: SessionLoginRequest, response: Response):
-    expected = configured_api_key()
-    if not expected or not hmac.compare_digest(body.api_key, expected):
-        raise APIError("UNAUTHORIZED", "API Key 无效", 401)
+    password_hash = load_admin_password_hash(body.username)
+    if not password_hash or not verify_password(body.password, password_hash):
+        raise APIError("UNAUTHORIZED", "用户名或密码错误", 401)
     expires_at = int(time.time()) + SESSION_TTL_SECONDS
     response.set_cookie(
         key=SESSION_COOKIE_NAME,

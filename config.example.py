@@ -15,11 +15,11 @@ DB_USER     = "quant"
 DB_PASSWORD = "YOUR_DB_PASSWORD_HERE"
 DB_NAME     = "quant_data"
 
-# 新交易实例接口的访问密钥。部署时请改为强随机值，或改由环境变量
-# TRADE_RUN_API_KEY 提供；不要提交真实密钥。
+# 受控脚本调用交易接口时可使用的访问密钥，不用于网页登录。
+# 可由环境变量 TRADE_RUN_API_KEY 覆盖；不要提交真实密钥。
 TRADE_RUN_API_KEY = "CHANGE_ME_TO_A_RANDOM_SECRET"
 
-# 管理后台会话签名密钥；部署时设置为与 API Key 不同的随机值。
+# 管理后台会话签名密钥；部署时设置为与脚本 API Key 不同的随机值。
 # 可用环境变量 TRADE_RUN_SESSION_SECRET 覆盖；不要提交真实密钥。
 TRADE_RUN_SESSION_SECRET = "CHANGE_ME_TO_ANOTHER_RANDOM_SECRET"
 
