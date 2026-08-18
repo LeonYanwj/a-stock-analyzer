@@ -15,6 +15,7 @@
 import json
 import uuid
 import logging
+import math
 import threading
 import traceback
 from datetime import datetime
@@ -149,6 +150,32 @@ class Task:
         return d
 
 
+def serialize_history_task_row(row) -> dict:
+    """将 Pandas 读取的归档任务行转换为严格 JSON 可序列化的字典。
+
+    MySQL 的可空 ``duration_seconds`` 经 Pandas 读取后会变成 ``NaN``，而
+    Starlette 的 JSON 响应会拒绝 NaN/Infinity。对前端而言，未知时长应表示为
+    JSON ``null``，而不是让整个任务列表返回 500。
+    """
+    d = row.to_dict()
+    if d.get("params") and isinstance(d["params"], str):
+        try:
+            d["params"] = json.loads(d["params"])
+        except json.JSONDecodeError:
+            pass
+    for key in ("created_at", "started_at", "finished_at"):
+        if d.get(key) is not None and hasattr(d[key], "isoformat"):
+            d[key] = d[key].isoformat()
+    duration = d.get("duration_seconds")
+    if duration is not None:
+        try:
+            duration = float(duration)
+        except (TypeError, ValueError):
+            duration = None
+        d["duration_seconds"] = duration if duration is not None and math.isfinite(duration) else None
+    return d
+
+
 # 全局任务表（进程级，每次启动清空）
 _TASKS: Dict[str, Task] = {}
 _LOCK = threading.Lock()
@@ -202,18 +229,7 @@ def list_history(name: str = None, status: str = None, limit: int = 30) -> list:
         # 把 datetime / decimal 转 JSON 友好
         rows = []
         for _, r in df.iterrows():
-            d = r.to_dict()
-            if d.get("params") and isinstance(d["params"], str):
-                try:
-                    d["params"] = json.loads(d["params"])
-                except json.JSONDecodeError:
-                    pass
-            for k in ("created_at", "started_at", "finished_at"):
-                if d.get(k) is not None and hasattr(d[k], "isoformat"):
-                    d[k] = d[k].isoformat()
-            if d.get("duration_seconds") is not None:
-                d["duration_seconds"] = float(d["duration_seconds"])
-            rows.append(d)
+            rows.append(serialize_history_task_row(r))
         return rows
     except Exception as e:
         logger.warning("[history] DB 查询失败: %s", e)

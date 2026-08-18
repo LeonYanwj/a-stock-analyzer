@@ -8,7 +8,7 @@ from datetime import datetime
 
 from trade_run.market_scan import (get_market_scan_task, list_market_scan_tasks,
                                    run_market_scan, submit_market_scan)
-from api.tasks import Task
+from api.tasks import Task, serialize_history_task_row
 from trade_run.models import TradeRunError
 
 
@@ -67,6 +67,20 @@ class _TaskManager:
 
 
 class MarketScanTests(unittest.TestCase):
+    def test_history_row_converts_nan_duration_to_json_null(self):
+        class _Row:
+            def to_dict(self):
+                return {
+                    "task_id": "scan-task-nan",
+                    "name": "market_scan",
+                    "status": "done",
+                    "duration_seconds": float("nan"),
+                }
+
+        row = serialize_history_task_row(_Row())
+
+        self.assertIsNone(row["duration_seconds"])
+
     def test_scan_returns_one_execution_strategy_candidate_pool_without_writing_plans(self):
         legacy = _Provider([
             {
