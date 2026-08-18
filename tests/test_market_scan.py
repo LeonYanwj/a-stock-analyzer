@@ -81,6 +81,22 @@ class MarketScanTests(unittest.TestCase):
 
         self.assertIsNone(row["duration_seconds"])
 
+    def test_scan_history_list_converts_nested_non_finite_values_to_null(self):
+        manager = _TaskManager()
+        manager.history = [{
+            "task_id": "scan-task-nested-nan",
+            "name": "market_scan",
+            "status": "done",
+            "duration_seconds": 1.2,
+            "params": {"legacy_value": float("nan")},
+            "result": {"metric": float("inf")},
+        }]
+
+        rows = list_market_scan_tasks(manager)
+
+        self.assertIsNone(rows[0]["params"]["legacy_value"])
+        self.assertIsNone(rows[0]["result"]["metric"])
+
     def test_scan_returns_one_execution_strategy_candidate_pool_without_writing_plans(self):
         legacy = _Provider([
             {

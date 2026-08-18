@@ -5,7 +5,9 @@
 计划仍由独立的确认动作负责。
 """
 import json
+import math
 from datetime import datetime
+from numbers import Integral, Real
 from typing import Any, Dict, Optional
 
 from .models import ASSET_TYPES, STRATEGY_CODES, TradeRunError, require
@@ -80,7 +82,9 @@ def list_market_scan_tasks(task_manager, limit: int = 30) -> list:
         task_id = row.get("task_id")
         if task_id not in unique or not unique[task_id].get("from_db", False):
             unique[task_id] = row
-    return sorted(unique.values(), key=lambda x: x.get("created_at") or "", reverse=True)[:limit]
+    return _json_safe(
+        sorted(unique.values(), key=lambda x: x.get("created_at") or "", reverse=True)[:limit]
+    )
 
 
 def get_market_scan_task(task_manager, task_id: str) -> Optional[dict]:
@@ -169,8 +173,21 @@ def _price_range(reference_price):
 
 
 def _json_safe(value):
-    """保留候选证据，同时保证任务结果可写入 JSON 归档。"""
+    """递归转换为严格 JSON 数据，拒绝 NaN/Infinity 泄漏到 HTTP 响应。"""
+    if value is None or isinstance(value, (str, bool)):
+        return value
+    if isinstance(value, Integral):
+        return int(value)
+    if isinstance(value, Real):
+        number = float(value)
+        return number if math.isfinite(number) else None
+    if isinstance(value, dict):
+        return {str(key): _json_safe(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple, set)):
+        return [_json_safe(item) for item in value]
+    if hasattr(value, "isoformat"):
+        return value.isoformat()
     try:
-        return json.loads(json.dumps(value, ensure_ascii=False, default=str))
+        return json.loads(json.dumps(value, ensure_ascii=False, default=str, allow_nan=False))
     except (TypeError, ValueError):
         return {"raw": str(value)}
