@@ -117,7 +117,7 @@
 
 | 方法 | 路径 | 用途 |
 |---|---|---|
-| POST | `/api/market-scans` | 提交后台市场扫描，立即返回 `task_id` |
+| POST | `/api/market-scans` | 提交后台市场扫描；股票支持 `stock_scope=quick`（成交额前 100，只）或 `full`（全市场） |
 | GET | `/api/market-scans` | 市场扫描任务记录（进行中 + 已归档） |
 | GET | `/api/market-scans/{task_id}` | 单条任务进度及完成后的候选池 |
 

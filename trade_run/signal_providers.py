@@ -30,6 +30,8 @@ class LegacySignalProvider:
             result = screen_market(
                 strategy=LEGACY_PROFILE[run["strategy_code"]], top_n_arg=10,
                 as_of_dt=as_of, verbose=False, persist_ratings=False,
+                stock_scope=run.get("stock_scope", "quick"),
+                quick_limit=run.get("quick_limit", 100),
                 progress_callback=progress_callback,
             )
             for ts_code, item in result.iterrows():

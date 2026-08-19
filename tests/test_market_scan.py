@@ -122,6 +122,8 @@ class MarketScanTests(unittest.TestCase):
         self.assertNotIn("primary_candidates", result)
         self.assertNotIn("shadow_candidates", result)
         self.assertEqual(legacy.calls[0][2], {"stock", "etf"})
+        self.assertEqual(legacy.calls[0][0]["stock_scope"], "quick")
+        self.assertEqual(legacy.calls[0][0]["quick_limit"], 100)
         self.assertEqual(unused.calls, [])
         self.assertEqual(task.reports[-1][0], 95)
 
@@ -144,6 +146,18 @@ class MarketScanTests(unittest.TestCase):
                 datetime(2026, 8, 17, 8, 45), providers={},
             )
 
+        with self.assertRaisesRegex(TradeRunError, "快速扫描"):
+            run_market_scan(
+                _ProgressRecorder(), _Service(), "medium_term", ["stock"], "pre_market",
+                datetime(2026, 8, 17, 8, 45), stock_scope="fast", providers={},
+            )
+
+        with self.assertRaisesRegex(TradeRunError, "50–500"):
+            run_market_scan(
+                _ProgressRecorder(), _Service(), "medium_term", ["stock"], "pre_market",
+                datetime(2026, 8, 17, 8, 45), quick_limit=20, providers={},
+            )
+
     def test_submit_and_task_history_are_independent_of_a_trade_run(self):
         manager = _TaskManager()
         submitted = submit_market_scan(
@@ -155,6 +169,8 @@ class MarketScanTests(unittest.TestCase):
         self.assertNotIn("run_id", manager.submitted["params"])
         self.assertEqual(manager.submitted["params"]["strategy_code"], "medium_term")
         self.assertEqual(manager.submitted["params"]["as_of"], "2026-08-17T08:45:00")
+        self.assertEqual(manager.submitted["params"]["stock_scope"], "quick")
+        self.assertEqual(manager.submitted["params"]["quick_limit"], 100)
 
         manager.memory = [_SubmittedTask()]
         manager.history = [

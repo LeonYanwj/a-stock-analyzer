@@ -21,6 +21,8 @@ class MarketScanRequest(BaseModel):
     strategy_code: str
     asset_types: List[str] = Field(..., min_length=1)
     plan_window: str
+    stock_scope: str = "quick"
+    quick_limit: int = Field(100, ge=50, le=500)
     as_of: Optional[datetime] = None
 
 
@@ -37,6 +39,7 @@ def submit_scan(body: MarketScanRequest, request: Request,
         task = submit_market_scan(
             task_mgr, get_service(), body.strategy_code, body.asset_types,
             body.plan_window, body.as_of or datetime.now(),
+            stock_scope=body.stock_scope, quick_limit=body.quick_limit,
         )
     except TradeRunError as exc:
         raise APIError(exc.code, exc.message, exc.status, exc.detail)

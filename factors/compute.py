@@ -10,6 +10,7 @@ import numpy as np
 import pandas as pd
 
 from pattern_recognizer import compute_pattern_score
+from market_data_integrity import ensure_unique_panel
 
 
 # 因子权重（正向：越大越好；权重为正表示该因子值越大越倾向于选入）
@@ -52,6 +53,7 @@ def compute_all_factors(panel: pd.DataFrame, asof_date: pd.Timestamp) -> pd.Data
     panel = panel.copy()
     panel["trade_date"] = pd.to_datetime(panel["trade_date"])
     panel = panel.sort_values(["ts_code", "trade_date"])
+    ensure_unique_panel(panel)
 
     asof_date = pd.to_datetime(asof_date)
     panel = panel[panel["trade_date"] <= asof_date]

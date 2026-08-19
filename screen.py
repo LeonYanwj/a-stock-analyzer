@@ -24,6 +24,7 @@ from factors import compute_all_factors
 from selector import score, top_n
 from news_scorer import compute_news_score
 from financial_risk import attach_financial_risk
+from market_data_integrity import ensure_unique_panel, one_row_per_ts_code
 from rating_store import prepare_snapshot, save_snapshot
 from strategies import (get_factor_weights, list_strategies,
                         calc_optimal_top_n, warn_if_capital_too_small,
@@ -35,6 +36,9 @@ TOP_N = 50
 API_SLEEP = 0.05   # AKShare 无硬限流，留极小间隔避免触发风控
 _BASE_MARKET_CACHE = {}
 _BASE_CACHE_TTL_SECONDS = 15 * 60
+QUICK_STOCK_SCOPE = "quick"
+FULL_STOCK_SCOPE = "full"
+DEFAULT_QUICK_STOCK_LIMIT = 100
 
 
 def fetch_history_panel(fetcher: DataFetcher, ts_codes, start, end,
@@ -115,10 +119,12 @@ def fetch_history_panel(fetcher: DataFetcher, ts_codes, start, end,
 
 
 def build_market_factors(asof_dt, lookback: int, limit: int = 0,
-                         verbose: bool = True, progress_callback=None):
+                         verbose: bool = True, progress_callback=None,
+                         stock_scope: str = FULL_STOCK_SCOPE,
+                         quick_limit: int = DEFAULT_QUICK_STOCK_LIMIT):
     """拉取一次全市场基础数据并计算策略无关的原始因子。"""
     asof = asof_dt.strftime("%Y%m%d")
-    cache_key = (asof, int(lookback), int(limit))
+    cache_key = (asof, int(lookback), int(limit), stock_scope, int(quick_limit))
     cached = _BASE_MARKET_CACHE.get(cache_key)
     if cached and time.time() - cached["cached_at"] <= _BASE_CACHE_TTL_SECONDS:
         if verbose:
@@ -134,6 +140,7 @@ def build_market_factors(asof_dt, lookback: int, limit: int = 0,
     start = (asof_dt - timedelta(days=lookback + 30)).strftime("%Y%m%d")
     universe = get_universe(
         fetcher, exclude_st=True, min_list_days=365, asof_date=asof_dt)
+    universe = one_row_per_ts_code(universe, list(universe.columns), "股票池")
     fin_df = fetcher.get_financial_latest_all()
     universe = attach_financial_risk(universe, fin_df)
     excluded_financial = int((~universe["eligible"]).sum())
@@ -148,32 +155,39 @@ def build_market_factors(asof_dt, lookback: int, limit: int = 0,
     if progress_callback:
         progress_callback(10, "读取行情快照、资金流与量能数据")
     spot = fetcher.get_market_snapshot()
+    universe = select_stock_scan_universe(universe, spot, stock_scope, quick_limit)
     fund_flow = fetcher.get_fund_flow_snapshot(window="5日排行")
     lxsz_df = fetcher.get_stock_rank_lxsz()
     if verbose and not fin_df.empty:
         print(f"  financial: {len(fin_df)} 只覆盖")
     if verbose:
-        print(f"  拉取 {len(universe)} 只股票 {lookback}+ 天日线...")
+        scope_label = "快速扫描" if stock_scope == QUICK_STOCK_SCOPE else "全市场扫描"
+        print(f"  {scope_label}：拉取 {len(universe)} 只股票 {lookback}+ 天日线...")
     panel = fetch_history_panel(fetcher, universe["ts_code"].tolist(), start, asof,
                                 progress_callback=progress_callback)
 
     spot_cols = [c for c in ["ts_code", "pe_ttm", "pb", "total_mv", "circ_mv"]
                  if c in spot.columns]
-    panel = panel.merge(spot[spot_cols], on="ts_code", how="left")
+    spot = one_row_per_ts_code(spot, spot_cols, "市场快照")
+    panel = panel.merge(spot, on="ts_code", how="left", validate="many_to_one")
     if not fund_flow.empty:
         flow_cols = [c for c in ["ts_code", "fund_inflow", "fund_outflow", "fund_net"]
                      if c in fund_flow.columns]
-        panel = panel.merge(fund_flow[flow_cols], on="ts_code", how="left")
+        fund_flow = one_row_per_ts_code(fund_flow, flow_cols, "资金流快照")
+        panel = panel.merge(fund_flow, on="ts_code", how="left", validate="many_to_one")
     if not lxsz_df.empty and "lxsz_days" in lxsz_df.columns:
-        panel = panel.merge(lxsz_df[["ts_code", "lxsz_days"]], on="ts_code", how="left")
+        lxsz_df = one_row_per_ts_code(lxsz_df, ["ts_code", "lxsz_days"], "量价齐升榜")
+        panel = panel.merge(lxsz_df, on="ts_code", how="left", validate="many_to_one")
     if not fin_df.empty:
         fin_cols = [c for c in ["ts_code", "roe", "gross_margin", "net_margin",
                                 "debt_ratio", "net_profit_yoy", "revenue_yoy"]
                     if c in fin_df.columns]
-        panel = panel.merge(fin_df[fin_cols], on="ts_code", how="left")
+        fin_df = one_row_per_ts_code(fin_df, fin_cols, "财务快照")
+        panel = panel.merge(fin_df, on="ts_code", how="left", validate="many_to_one")
 
     if progress_callback:
         progress_callback(92, "计算多因子评分输入")
+    ensure_unique_panel(panel)
     factors = compute_all_factors(panel, asof_date=asof)
     # 外部行情完全缺失的股票也保留一条 N/A 评级，便于追踪数据覆盖问题。
     factors = factors.reindex(universe["ts_code"].tolist())
@@ -187,13 +201,41 @@ def build_market_factors(asof_dt, lookback: int, limit: int = 0,
     return fetcher, universe, factors, effective_date
 
 
+def select_stock_scan_universe(universe: pd.DataFrame, spot: pd.DataFrame,
+                               stock_scope: str = FULL_STOCK_SCOPE,
+                               quick_limit: int = DEFAULT_QUICK_STOCK_LIMIT) -> pd.DataFrame:
+    """按扫描模式选择股票范围。
+
+    快速扫描只取当次市场快照中成交额最高的主板合格股票，顺序使用 ``amount DESC,
+    ts_code ASC`` 固化，避免 DataFrame 原始返回顺序决定扫描结果。
+    """
+    if stock_scope == FULL_STOCK_SCOPE:
+        return universe.copy()
+    if stock_scope != QUICK_STOCK_SCOPE:
+        raise ValueError(f"未知股票扫描范围：{stock_scope}")
+    if "amount" not in spot.columns:
+        raise RuntimeError("市场快照缺少成交额字段，无法执行快速扫描")
+    amount_snapshot = one_row_per_ts_code(spot, ["ts_code", "amount"], "市场快照")
+    ranked = universe.merge(amount_snapshot, on="ts_code", how="left", validate="many_to_one")
+    ranked["amount"] = pd.to_numeric(ranked["amount"], errors="coerce")
+    ranked = ranked[ranked["amount"].notna() & (ranked["amount"] > 0)].copy()
+    if ranked.empty:
+        raise RuntimeError("市场快照没有可用成交额，无法执行快速扫描")
+    ranked = ranked.sort_values(["amount", "ts_code"], ascending=[False, True], kind="mergesort")
+    selected = ranked.head(quick_limit).drop(columns=["amount"])
+    selected.attrs["stock_scope"] = QUICK_STOCK_SCOPE
+    selected.attrs["quick_limit"] = quick_limit
+    return selected
+
+
 def screen_market(strategy: str = "swing", capital: float = 0,
                   top_n_arg: int = 0, lookback: int = LOOKBACK_DAYS,
                   limit: int = 0, enable_news: bool = False,
                   refine: int = 100, news_weight: float = 0.15,
                   verbose: bool = True, return_all: bool = False,
                   persist_ratings: bool = True, as_of_dt=None,
-                  progress_callback=None) -> pd.DataFrame:
+                  progress_callback=None, stock_scope: str = FULL_STOCK_SCOPE,
+                  quick_limit: int = DEFAULT_QUICK_STOCK_LIMIT) -> pd.DataFrame:
     """全市场选股核心函数（可被其他脚本调用，如 paper.py）
 
     Returns:
@@ -217,7 +259,8 @@ def screen_market(strategy: str = "swing", capital: float = 0,
 
     fetcher, universe, factors, effective_date = build_market_factors(
         asof_dt, lookback=lookback, limit=limit, verbose=verbose,
-        progress_callback=progress_callback)
+        progress_callback=progress_callback, stock_scope=stock_scope,
+        quick_limit=quick_limit)
     if progress_callback:
         progress_callback(95, "按策略权重计算排名")
     weights = get_factor_weights(strategy)
@@ -262,11 +305,22 @@ def screen_market(strategy: str = "swing", capital: float = 0,
     if return_all:
         if progress_callback:
             progress_callback(100, "市场扫描候选池已生成")
+        snapshot.attrs["scan_scope"] = _scan_scope_metadata(stock_scope, quick_limit, len(universe))
         return snapshot
     result = top_n(snapshot, n=top_actual)
+    result.attrs["scan_scope"] = _scan_scope_metadata(stock_scope, quick_limit, len(universe))
     if progress_callback:
         progress_callback(100, "市场扫描候选池已生成")
     return result
+
+
+def _scan_scope_metadata(stock_scope: str, quick_limit: int, universe_count: int) -> dict:
+    return {
+        "stock_scope": stock_scope,
+        "quick_limit": quick_limit if stock_scope == QUICK_STOCK_SCOPE else None,
+        "actual_stock_count": universe_count,
+        "selection_rule": "latest_amount_desc" if stock_scope == QUICK_STOCK_SCOPE else "all_eligible_main_board",
+    }
 
 
 def main():

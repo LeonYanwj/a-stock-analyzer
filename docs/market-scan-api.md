@@ -60,7 +60,8 @@ async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
 | 页面控件 | 请求字段 | 可选值 | 含义 |
 | --- | --- | --- | --- |
 | 策略 | `strategy_code` | `short_term`、`medium_term`、`long_term` | 选择筛选和排序规则 |
-| 扫描范围 | `asset_types` | `stock`、`etf`，至少选一项 | 决定扫描股票、ETF 或两者 |
+| 资产范围 | `asset_types` | `stock`、`etf`，至少选一项 | 决定扫描股票、ETF 或两者 |
+| 股票覆盖 | `stock_scope` | `quick`、`full` | 有股票时，选择快速扫描或全市场扫描 |
 | 扫描时段 | `plan_window` | `pre_market`、`midday` | 标记扫描窗口和对应数据截面 |
 
 推荐中文显示名称：
@@ -96,12 +97,18 @@ export const SCAN_WINDOW_OPTIONS = [
 export type AssetType = 'stock' | 'etf'
 export type StrategyCode = 'short_term' | 'medium_term' | 'long_term'
 export type PlanWindow = 'pre_market' | 'midday'
+export type StockScanScope = 'quick' | 'full'
 export type MarketScanTaskPhase = 'pending' | 'running' | 'done' | 'failed'
 
 export interface MarketScanSubmitRequest {
   strategy_code: StrategyCode
   asset_types: AssetType[]
   plan_window: PlanWindow
+  // 默认 quick：按当次最新成交额取前 quick_limit 只合格主板股票。
+  // full：扫描全部合格主板股票。
+  stock_scope?: StockScanScope
+  // 仅 stock_scope='quick' 有效，范围 50–500，默认 100。
+  quick_limit?: number
   // 可选。未传时由后端使用提交时刻；历史回放或固定截图时才传。
   as_of?: string
 }
@@ -155,6 +162,8 @@ export interface MarketScanTask {
     strategy_code: StrategyCode
     asset_types: AssetType[]
     plan_window: PlanWindow
+    stock_scope?: StockScanScope | null
+    quick_limit?: number | null
     as_of: string
   }
   result?: MarketScanResult
@@ -189,6 +198,8 @@ const submitted = await request<{
     strategy_code: 'medium_term',
     asset_types: ['stock', 'etf'],
     plan_window: 'pre_market',
+    stock_scope: 'quick',
+    quick_limit: 100,
   } satisfies MarketScanSubmitRequest),
 })
 ```
@@ -209,6 +220,8 @@ const submitted = await request<{
       "task_type": "market_scan",
       "strategy_code": "medium_term",
       "asset_types": ["etf", "stock"],
+      "stock_scope": "quick",
+      "quick_limit": 100,
       "plan_window": "pre_market",
       "as_of": "2026-08-18T08:45:00+08:00"
     }
@@ -234,6 +247,7 @@ const submitted = await request<{
 | 任务 ID | `task_id`，可显示前 8–12 位，但点击详情仍用完整 ID |
 | 策略 | `params.strategy_code` 映射中文名称 |
 | 范围 | `params.asset_types` 映射为“股票 / ETF” |
+| 股票覆盖 | 股票范围含 `stock` 时，显示 `params.stock_scope`；`quick` 显示“快速扫描（前 N 只）”，`full` 显示“全市场扫描” |
 | 扫描时段 | `params.plan_window` 映射为“盘前扫描 / 午间扫描” |
 | 状态 | `status` |
 | 进度 | `progress`，仅 `pending`、`running` 展示进度条 |
@@ -344,6 +358,8 @@ const blocked = candidates.filter(item => item.candidate_status === 'blocked')
 | `400 UNKNOWN_STRATEGY` | 提示策略无效，刷新本地策略选项或回退到中线策略 |
 | `400 INVALID_ASSET_TYPES` | 阻止提交，提示至少选择“股票”或“ETF”之一 |
 | `400 INVALID_PLAN_WINDOW` | 阻止提交，回退到 `pre_market` 或 `midday` |
+| `400 INVALID_STOCK_SCOPE` | 阻止提交，股票覆盖仅能选“快速扫描”或“全市场扫描” |
+| `400 INVALID_QUICK_LIMIT` | 阻止提交，快速扫描数量仅支持 50–500 |
 | `task.status = failed` | 后台扫描失败；在任务详情显示 `task.error`，保留任务记录，允许用户重新发起新任务 |
 | `503 TRADE_RUN_NOT_CONFIGURED` | 扫描器需要读取研究数据，但后端尚未配置数据库；提示“服务端数据连接尚未就绪” |
 | `404 MARKET_SCAN_TASK_NOT_FOUND` | 任务可能被清理或 ID 错误；刷新任务列表，不要继续轮询 |
@@ -351,6 +367,7 @@ const blocked = candidates.filter(item => item.candidate_status === 'blocked')
 ## 前端实现检查清单
 
 - [ ] 扫描页包含策略下拉、股票/ETF 多选和盘前/午间下拉。
+- [ ] 勾选“股票”时显示快速扫描和全市场扫描选择；默认快速扫描，固定为成交额前 100 只主板合格股票。
 - [ ] “开始市场扫描”不依赖任何交易实例的 `running` 状态。
 - [ ] 点击后立即在任务列表插入 `POST` 响应中的 `task`。
 - [ ] 每秒轮询任务详情，更新列表行和已打开的详情页。
