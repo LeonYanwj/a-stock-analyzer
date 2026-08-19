@@ -7,6 +7,7 @@ except ImportError:
     pd = None
 
 if pd is not None:
+    from data.fetcher import deduplicate_fund_flow_rows
     from market_data_integrity import (MarketDataIntegrityError, ensure_unique_panel,
                                        one_row_per_ts_code)
     from screen import select_stock_scan_universe
@@ -33,6 +34,18 @@ class MarketDataIntegrityTests(unittest.TestCase):
 
         with self.assertRaisesRegex(MarketDataIntegrityError, "资金流快照.*600000.SH"):
             one_row_per_ts_code(source, ["ts_code", "fund_net"], "资金流快照")
+
+    def test_fund_flow_source_duplicates_keep_the_first_ranked_row(self):
+        source = pd.DataFrame([
+            {"ts_code": "600165.SH", "symbol": "600165", "fund_net": 100.0},
+            {"ts_code": "600165.SH", "symbol": "600165", "fund_net": 200.0},
+            {"ts_code": "000001.SZ", "symbol": "000001", "fund_net": 50.0},
+        ])
+
+        result = deduplicate_fund_flow_rows(source)
+
+        self.assertEqual(result["ts_code"].tolist(), ["600165.SH", "000001.SZ"])
+        self.assertEqual(result.loc[0, "fund_net"], 100.0)
 
     def test_factor_panel_rejects_duplicate_security_trade_date_pairs(self):
         panel = pd.DataFrame([

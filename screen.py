@@ -163,26 +163,30 @@ def build_market_factors(asof_dt, lookback: int, limit: int = 0,
     if verbose:
         scope_label = "快速扫描" if stock_scope == QUICK_STOCK_SCOPE else "全市场扫描"
         print(f"  {scope_label}：拉取 {len(universe)} 只股票 {lookback}+ 天日线...")
-    panel = fetch_history_panel(fetcher, universe["ts_code"].tolist(), start, asof,
-                                progress_callback=progress_callback)
-
+    # 截面数据在补日线前校验，避免数据源异常时已经耗费数分钟拉取股票历史。
     spot_cols = [c for c in ["ts_code", "pe_ttm", "pb", "total_mv", "circ_mv"]
                  if c in spot.columns]
     spot = one_row_per_ts_code(spot, spot_cols, "市场快照")
-    panel = panel.merge(spot, on="ts_code", how="left", validate="many_to_one")
     if not fund_flow.empty:
         flow_cols = [c for c in ["ts_code", "fund_inflow", "fund_outflow", "fund_net"]
                      if c in fund_flow.columns]
         fund_flow = one_row_per_ts_code(fund_flow, flow_cols, "资金流快照")
-        panel = panel.merge(fund_flow, on="ts_code", how="left", validate="many_to_one")
     if not lxsz_df.empty and "lxsz_days" in lxsz_df.columns:
         lxsz_df = one_row_per_ts_code(lxsz_df, ["ts_code", "lxsz_days"], "量价齐升榜")
-        panel = panel.merge(lxsz_df, on="ts_code", how="left", validate="many_to_one")
     if not fin_df.empty:
         fin_cols = [c for c in ["ts_code", "roe", "gross_margin", "net_margin",
                                 "debt_ratio", "net_profit_yoy", "revenue_yoy"]
                     if c in fin_df.columns]
         fin_df = one_row_per_ts_code(fin_df, fin_cols, "财务快照")
+    panel = fetch_history_panel(fetcher, universe["ts_code"].tolist(), start, asof,
+                                progress_callback=progress_callback)
+
+    panel = panel.merge(spot, on="ts_code", how="left", validate="many_to_one")
+    if not fund_flow.empty:
+        panel = panel.merge(fund_flow, on="ts_code", how="left", validate="many_to_one")
+    if not lxsz_df.empty and "lxsz_days" in lxsz_df.columns:
+        panel = panel.merge(lxsz_df, on="ts_code", how="left", validate="many_to_one")
+    if not fin_df.empty:
         panel = panel.merge(fin_df, on="ts_code", how="left", validate="many_to_one")
 
     if progress_callback:

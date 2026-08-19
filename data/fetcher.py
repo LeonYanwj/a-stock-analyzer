@@ -40,6 +40,30 @@ def ts_code_to_sina_symbol(ts_code: str) -> str:
     return base
 
 
+def deduplicate_fund_flow_rows(df: pd.DataFrame) -> pd.DataFrame:
+    """按同花顺原始排行顺序保留每只股票的第一条资金流记录。
+
+    ``stock_fund_flow_individual`` 偶发重复证券代码，且重复行的数值并不总是
+    相同。该接口没有逐行更新时间可用于判断“最新”，但原始顺序是同一排行快照
+    的稳定优先级，因此保留第一次出现的记录，并在标准输出记录数据源异常。
+    这样不会将一对多合并带入因子表，也不会为了外部源的偶发重复中止整次扫描。
+    """
+    if df.empty or "ts_code" not in df.columns:
+        return df
+    duplicate_mask = df["ts_code"].duplicated(keep=False)
+    if not duplicate_mask.any():
+        return df
+    duplicate_codes = df.loc[duplicate_mask, "ts_code"].drop_duplicates().tolist()
+    sample = ", ".join(str(code) for code in duplicate_codes[:5])
+    suffix = f" 等 {len(duplicate_codes)} 只" if len(duplicate_codes) > 5 else ""
+    print(
+        f"  [warn] 同花顺资金流快照重复证券：{sample}{suffix}；"
+        "按原始排行顺序保留首条记录",
+        flush=True,
+    )
+    return df.loc[~df["ts_code"].duplicated(keep="first")].copy()
+
+
 # AKShare spot 字段 -> 统一英文（兼容东财和新浪源）
 _SPOT_RENAME = {
     "代码": "symbol",
@@ -599,6 +623,7 @@ class DataFetcher:
         keep = [c for c in ["ts_code", "symbol", "fund_inflow", "fund_outflow", "fund_net"]
                 if c in df.columns]
         df = df[keep].copy()
+        df = deduplicate_fund_flow_rows(df)
 
         print(f"  [fund_flow] window={window}, rows={len(df)}, cols={list(df.columns)}")
         self._fund_flow_cache[window] = df
