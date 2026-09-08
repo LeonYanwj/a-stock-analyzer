@@ -8,3 +8,10 @@ pymysql
 fastapi
 uvicorn[standard]
 apscheduler
+
+# vn.py 主框架与迅投研 A 股/ETF 行情 gateway。
+# vn.py 要求 Python >= 3.10；Alpha 策略/回测依赖通过 vnpy[alpha] 安装。
+vnpy[alpha]>=4.0.0
+vnpy_xt>=1.0.0
+# Linux 本地快速演示（仅模拟行情，不连接真实账户）
+vnpy_ctptest>=6.7.2

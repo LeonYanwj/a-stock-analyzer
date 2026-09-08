@@ -8,6 +8,46 @@
 pip install -r requirements.txt
 ```
 
+### vn.py 行情、策略与回测
+
+项目新主链路通过 `vnpy_runtime` 接入 vn.py 和迅投研 XtGateway。先安装
+`requirements.txt` 中的 vn.py 依赖，并在项目根目录 `config.py` 中设置迅投 Token（该文件已被 Git 忽略）：
+
+如果只是先验证 Linux 环境和 vn.py 链路，不需要 Token，直接运行本地模拟网关：
+
+```bash
+.venv-vnpy/bin/python examples/vnpy_linux_demo.py
+```
+
+看到连续的 `TICK 000001.SZSE` 和最后的 `OK` 即表示 vn.py 事件引擎、网关和订阅链路正常。这个 demo 只生成模拟行情，不代表 A 股真实行情。
+
+```python
+XTPY_MODE = "token"
+XT_TOKEN = "你的迅投接口Token"
+XT_ACCOUNT_ID = ""
+XT_ACCOUNT_TYPE = "股票"
+XT_PATH = ""
+```
+
+然后启动服务：
+
+```bash
+python -m uvicorn api.main:app --host 0.0.0.0 --port 8000
+```
+
+常用接口：
+
+- `GET /api/vnpy/status`：检查依赖和连接状态，不返回 Token；
+- `POST /api/vnpy/connect`：连接迅投行情；
+- `POST /api/vnpy/subscribe`：订阅 `000001.SZSE`、`600000.SSE` 等标的；
+- `GET /api/vnpy/ticks`：读取最近收到的 Tick；
+- `POST /api/vnpy/history/sync`：下载历史 K 线到 `data/vnpy_lab`；
+- `POST /api/vnpy/backtests`：使用 AlphaLab 信号和 vn.py 官方
+  `EquityDemoStrategy` 异步回测。
+
+迅投 `xtquant` 不随 vn.py 主仓库发布，需要按 [vnpy_xt 官方说明](https://github.com/vnpy/vnpy_xt)
+安装其 Python 库。旧选股、模拟盘和自定义回测链路会在新链路完成验证后再下线。
+
 在 [Tushare](https://tushare.pro) 注册账号获取 token，填入 `config.py` 的 `TUSHARE_TOKEN`。
 
 ## 运行

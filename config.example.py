@@ -26,6 +26,15 @@ TRADE_RUN_SESSION_SECRET = "CHANGE_ME_TO_ANOTHER_RANDOM_SECRET"
 # 生产 HTTPS 站点设为 True，本地 Vite 联调保留 False。
 TRADE_RUN_COOKIE_SECURE = False
 
+# vn.py / 迅投研配置（config.py 已被 .gitignore 忽略）
+# token 模式：在迅投研平台生成接口 Token 后填写 XT_TOKEN。
+# client 模式：XT_TOKEN 留空，填写本机迅投客户端的安装/运行路径 XT_PATH。
+XTPY_MODE = "token"
+XT_TOKEN = "YOUR_XT_TOKEN_HERE"
+XT_ACCOUNT_ID = ""            # 仅启用交易时需要，行情订阅可留空
+XT_ACCOUNT_TYPE = "股票"
+XT_PATH = ""
+
 # 回测默认参数
 DEFAULT_COMMISSION = 0.0001       # 手续费率 万一
 DEFAULT_MIN_COMMISSION = 5.0      # 单笔最低佣金 5 元（不免 5）
