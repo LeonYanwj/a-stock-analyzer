@@ -9,7 +9,7 @@ from vnpy.trader.event import EVENT_TICK
 from vnpy.trader.object import SubscribeRequest
 from vnpy.trader.constant import Exchange
 
-from vnpy_runtime.demo import LocalDemoGateway
+from astock.vnpy_runtime.demo import LocalDemoGateway
 
 
 def main() -> None:

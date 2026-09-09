@@ -1,10 +1,10 @@
 import unittest
 from types import SimpleNamespace
 
-from vnpy_runtime.config import VnpySettings
-from vnpy_runtime.gateway import _normalize_vt_symbol, VnpyRuntime
-from vnpy_runtime.strategy import equity_demo_strategy_info
-from vnpy_runtime.history import sync_history
+from astock.vnpy_runtime.config import VnpySettings
+from astock.vnpy_runtime.gateway import _normalize_vt_symbol, VnpyRuntime
+from astock.vnpy_runtime.strategy import equity_demo_strategy_info
+from astock.vnpy_runtime.history import sync_history
 
 
 class VnpyRuntimeConfigTests(unittest.TestCase):

@@ -3,13 +3,13 @@
 import getpass
 import sys
 
-from api.passwords import hash_password
-from data.db import get_conn
+from astock.api.passwords import hash_password
+from astock.data.db import get_conn
 
 
 def main():
     if len(sys.argv) != 2 or not sys.argv[1].strip():
-        raise SystemExit("用法: python scripts/manage_admin_user.py <用户名>")
+        raise SystemExit("用法: python -m scripts.manage_admin_user <用户名>")
 
     username = sys.argv[1].strip()
     password = getpass.getpass("管理员密码: ")

@@ -6,10 +6,10 @@
 import unittest
 from datetime import datetime
 
-from trade_run.market_scan import (get_market_scan_task, list_market_scan_tasks,
+from astock.trade_run.market_scan import (get_market_scan_task, list_market_scan_tasks,
                                    run_market_scan, submit_market_scan)
-from api.tasks import Task, serialize_history_task_row
-from trade_run.models import TradeRunError
+from astock.api.tasks import Task, serialize_history_task_row
+from astock.trade_run.models import TradeRunError
 
 
 class _ProgressRecorder:
@@ -98,12 +98,12 @@ class MarketScanTests(unittest.TestCase):
         self.assertIsNone(rows[0]["result"]["metric"])
 
     def test_scan_returns_one_execution_strategy_candidate_pool_without_writing_plans(self):
-        legacy = _Provider([
+        vnpy = _Provider([
             {
                 "ts_code": "600000.SH", "asset_type": "stock", "side": "buy",
                 "reference_price": 10.25, "score": 0.82,
-                "reason": "旧体系多因子排名入选", "data_status": "delayed",
-                "data_source": "legacy_screen", "market_time": datetime(2026, 8, 17, 8, 45),
+                "reason": "vn.py Alpha101 横截面信号入选", "data_status": "delayed",
+                "data_source": "vnpy_alpha101", "market_time": datetime(2026, 8, 17, 8, 45),
             },
         ])
         unused = _Provider([])
@@ -112,7 +112,7 @@ class MarketScanTests(unittest.TestCase):
         result = run_market_scan(
             task, _Service(), "medium_term", ["stock", "etf"], "pre_market",
             datetime(2026, 8, 17, 8, 45),
-            providers={"legacy": legacy, "new": unused},
+            providers={"vnpy": vnpy, "vnpy_reference": unused},
         )
 
         self.assertEqual(result["strategy_code"], "medium_term")
@@ -121,9 +121,9 @@ class MarketScanTests(unittest.TestCase):
         self.assertTrue(result["candidates"][0]["execution_confirmation_required"])
         self.assertNotIn("primary_candidates", result)
         self.assertNotIn("shadow_candidates", result)
-        self.assertEqual(legacy.calls[0][2], {"stock", "etf"})
-        self.assertEqual(legacy.calls[0][0]["stock_scope"], "quick")
-        self.assertEqual(legacy.calls[0][0]["quick_limit"], 100)
+        self.assertEqual(vnpy.calls[0][2], {"stock", "etf"})
+        self.assertEqual(vnpy.calls[0][0]["stock_scope"], "quick")
+        self.assertEqual(vnpy.calls[0][0]["quick_limit"], 100)
         self.assertEqual(unused.calls, [])
         self.assertEqual(task.reports[-1][0], 95)
 

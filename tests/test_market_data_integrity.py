@@ -7,10 +7,10 @@ except ImportError:
     pd = None
 
 if pd is not None:
-    from data.fetcher import deduplicate_fund_flow_rows
-    from market_data_integrity import (MarketDataIntegrityError, ensure_unique_panel,
+    from astock.data.fetcher import deduplicate_fund_flow_rows
+    from astock.market_data_integrity import (MarketDataIntegrityError, ensure_unique_panel,
                                        one_row_per_ts_code)
-    from screen import select_stock_scan_universe
+    from astock.screen import select_stock_scan_universe
 
 
 @unittest.skipUnless(pd is not None, "当前解释器未安装 Pandas")

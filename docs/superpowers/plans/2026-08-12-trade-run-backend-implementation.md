@@ -19,11 +19,11 @@
 
 ### 新增
 
-- `trade_run/__init__.py`
-- `trade_run/models.py`：领域枚举、状态迁移表、领域数据结构和序列化辅助。
-- `trade_run/repository.py`：数据库方言隔离的 CRUD、事务、行锁和派生查询。
-- `trade_run/service.py`：创建/启动/暂停/结束/删除、计划生成、成交回填、持仓资金重建、概览聚合。
-- `api/routes/trade_runs.py`：新 API 路由和请求/响应模型。
+- `astock/trade_run/__init__.py`
+- `astock/trade_run/models.py`：领域枚举、状态迁移表、领域数据结构和序列化辅助。
+- `astock/trade_run/repository.py`：数据库方言隔离的 CRUD、事务、行锁和派生查询。
+- `astock/trade_run/service.py`：创建/启动/暂停/结束/删除、计划生成、成交回填、持仓资金重建、概览聚合。
+- `astock/api/routes/trade_runs.py`：新 API 路由和请求/响应模型。
 - `tests/test_trade_run_state.py`：状态机、软删除、同策略并发约束。
 - `tests/test_trade_run_accounting.py`：计划不改账、成交事务、部分成交、重复成交、超卖/现金不足。
 - `tests/test_trade_run_api.py`：隔离数据库下的关键 HTTP 契约。
@@ -31,9 +31,9 @@
 
 ### 修改
 
-- `api/main.py`：注册 `trade_runs.router`，根路径版本与新接口概况同步。
-- `api/errors.py`：补充交易实例领域错误码（不存在、状态非法、已存在运行实例、数据阻塞、账务冲突）。
-- `API.md`：重写为前端使用的交易实例接口契约；旧账户接口移入兼容/迁移说明，不再作为新流程示例。
+- `astock/api/main.py`：注册 `trade_runs.router`，根路径版本与新接口概况同步。
+- `astock/api/errors.py`：补充交易实例领域错误码（不存在、状态非法、已存在运行实例、数据阻塞、账务冲突）。
+- `docs/API.md`：重写为前端使用的交易实例接口契约；旧账户接口移入兼容/迁移说明，不再作为新流程示例。
 - `requirements.txt`：只在测试适配层确有需要时补充依赖，优先复用现有 FastAPI/Pydantic/数据库依赖。
 
 不修改：`AGENTS.md`、`MEMORY.md`、用户前端目录及旧模拟盘业务实现，除非测试证明新路由必须共享其中的只读工具。
@@ -76,7 +76,7 @@
    - `run_position`、`run_cash_ledger`；
    - `risk_event`、`audit_event`；
    - 必要的外键、唯一键、状态/实例索引和幂等键。
-2. 在 `trade_run/models.py` 集中定义策略代码、资产类型、方向、计划状态、实例状态和错误语义，避免路由内散落字符串。
+2. 在 `astock/trade_run/models.py` 集中定义策略代码、资产类型、方向、计划状态、实例状态和错误语义，避免路由内散落字符串。
 3. 在 `repository.py` 实现参数化 SQL；写操作显式接收事务连接，读取运行实例时支持 `FOR UPDATE`。
 4. 在 `service.py` 实现状态迁移，所有迁移检查旧状态、写审计事件，并在一个事务内提交。
 5. 注册策略定义/版本只读接口；首期内置短线、中线、长线三个稳定版本，版本指纹固定。
@@ -92,8 +92,8 @@
    - 对未成交记录原因和计划状态；
    - 对修正使用反向/冲销记录，不覆盖原成交。
 4. 增加概览聚合：运行状态、现金、持仓市值（无行情时标注 `cost`/`stale`）、已实现/未实现收益、费用、计划数、成交数、阻塞数和最近审计事件。
-5. 注册路由并更新 `api/main.py`。路由层只负责解析、鉴权预留、调用服务和映射错误，不嵌入账务计算。
-6. 重写 `API.md`：每个新接口给出中文用途、请求示例、响应示例、字段定义、枚举、分页、错误码和免费行情延迟语义；明确“当前只能人工照抄，未接券商 API”。
+5. 注册路由并更新 `astock/api/main.py`。路由层只负责解析、鉴权预留、调用服务和映射错误，不嵌入账务计算。
+6. 重写 `docs/API.md`：每个新接口给出中文用途、请求示例、响应示例、字段定义、枚举、分页、错误码和免费行情延迟语义；明确“当前只能人工照抄，未接券商 API”。
 7. 完成 M2 测试后运行验证命令，提交：`feat(trade-run): add manual plan fill and dashboard APIs`。
 
 ## 6. 隔离测试和验证命令
@@ -101,7 +101,7 @@
 优先使用项目可用的 `python3`，不创建或修改生产配置。建议命令：
 
 ```bash
-python3 -m compileall -q trade_run api tests
+python3 -m compileall -q astock tests
 python3 -m unittest discover -s tests -p 'test_trade_run_*.py' -v
 git diff --check
 ```

@@ -10,13 +10,13 @@ pip install -r requirements.txt
 
 ### vn.py 行情、策略与回测
 
-项目新主链路通过 `vnpy_runtime` 接入 vn.py 和迅投研 XtGateway。先安装
+项目新主链路通过 `astock.vnpy_runtime` 接入 vn.py 和迅投研 XtGateway。先安装
 `requirements.txt` 中的 vn.py 依赖，并在项目根目录 `config.py` 中设置迅投 Token（该文件已被 Git 忽略）：
 
 如果只是先验证 Linux 环境和 vn.py 链路，不需要 Token，直接运行本地模拟网关：
 
 ```bash
-.venv-vnpy/bin/python examples/vnpy_linux_demo.py
+.venv-vnpy/bin/python -m examples.vnpy_linux_demo
 ```
 
 看到连续的 `TICK 000001.SZSE` 和最后的 `OK` 即表示 vn.py 事件引擎、网关和订阅链路正常。这个 demo 只生成模拟行情，不代表 A 股真实行情。
@@ -32,7 +32,7 @@ XT_PATH = ""
 然后启动服务：
 
 ```bash
-python -m uvicorn api.main:app --host 0.0.0.0 --port 8000
+python -m uvicorn astock.api.main:app --host 0.0.0.0 --port 8000
 ```
 
 常用接口：
@@ -46,14 +46,15 @@ python -m uvicorn api.main:app --host 0.0.0.0 --port 8000
   `EquityDemoStrategy` 异步回测。
 
 迅投 `xtquant` 不随 vn.py 主仓库发布，需要按 [vnpy_xt 官方说明](https://github.com/vnpy/vnpy_xt)
-安装其 Python 库。旧选股、模拟盘和自定义回测链路会在新链路完成验证后再下线。
+安装其 Python 库。新建交易实例和市场扫描固定使用 vn.py `Alpha101` 信号；仓库中的
+`astock/vnpy_runtime/vnpy/` 目录仅用于源码审阅，不作为运行时安装来源。旧选股、模拟盘自动调仓和自定义回测入口已停用，历史记录只读保留。
 
 在 [Tushare](https://tushare.pro) 注册账号获取 token，填入 `config.py` 的 `TUSHARE_TOKEN`。
 
 ## 运行
 
 ```bash
-python main.py
+python -m examples.main
 ```
 
 默认对平安银行（`000001.SZ`）跑 MA5×MA20 均线交叉策略，从 2024-01-01 到今天。运行后生成：
@@ -64,28 +65,58 @@ python main.py
 
 ## 模块结构
 
-```
+全部业务代码已收进 `astock/`；测试、示例和维护脚本分别归入 `tests/`、`examples/` 和 `scripts/`。
+以下命令均从项目根目录运行，使用 `python -m` 保证业务包和根目录配置可以正确导入。
+旧根目录命令已替换为模块命令；启动前先切换到项目根目录。
+
+| 用途 | 命令 |
+|------|------|
+| API 服务 | `python -m uvicorn astock.api.main:app --host 0.0.0.0 --port 8000` |
+| vn.py Alpha 选股 | 通过 `POST /api/market-scans` 运行 |
+| 单股评级 | `python -m astock.rate 002028` |
+| 模拟盘查询 | `python -m astock.paper list` |
+| vn.py Alpha 回测 | `POST /api/vnpy/backtests` |
+| 单股均线回测示例（拉取行情并出图） | `python -m examples.main` |
+| 离线回测（读取已有缓存） | `python -m examples.demo_backtest --code 000001.SZ` |
+| 股票基础资料和估值初始化 | `python -m scripts.init_data --limit 100` |
+| 财务数据初始化 | `python -m scripts.init_financial --limit 500` |
+| 交易日历初始化 | `python -m scripts.init_trade_calendar` |
+| 查看缓存迁移范围 | `python -m scripts.migrate_cache_to_db --dry-run` |
+| 查询历史回测 | `python -m scripts.query_backtest` |
+| 离线选股流程验证 | `python -m tests.test_mock` |
+| 离线评级流程验证 | `python -m tests.test_rating` |
+| 每日评级规则测试 | `python -m unittest tests.test_daily_rating_rules` |
+
+数据初始化命令会请求行情源并写入配置的数据库；执行前需确认目标环境。
+完整测试可使用 `python -m unittest discover -s tests -t .`；两个 Mock 流程仍按上表单独运行。
+安装完整依赖需要 Python 3.10 或以上。API 启动命令已改为 `python -m uvicorn astock.api.main:app`。
+行情缓存和运行输出仍使用项目根目录的 `cache/`、`output/`、`data/vnpy_lab/`，其中 `astock/data/` 仅存放 Python 源码。
+项目进展见 [项目状态](docs/PROJECT_STATUS.md)，接口说明见 [API 文档](docs/API.md)。
+
+```text
 a-stock-analyzer/
-├── main.py              # 单股回测入口（MA 交叉策略）
-├── screen.py            # 全市场多因子选股入口
-├── test_mock.py         # mock 数据测试，验证选股流程
-├── config.py            # 配置（被 .gitignore 忽略，复制 config.example.py 使用）
-├── universe.py          # 沪深主板股票池筛选
-├── selector.py          # 因子打分与排序
-├── data/
-│   └── fetcher.py       # 行情数据获取（AKShare 后端）+ CSV 缓存
-├── analysis/
-│   └── indicators.py    # MA / EMA / MACD / RSI / KDJ / BOLL
-├── strategy/
-│   ├── base.py          # 策略抽象基类
-│   └── ma_cross.py      # 均线交叉策略
-├── factors/
-│   └── compute.py       # 价值/动量/反转/规模/低波/流动性 7 因子
-├── backtest/
-│   ├── engine.py        # 回测引擎（手续费、滑点、全仓买卖）
-│   └── metrics.py       # 收益率、回撤、夏普、胜率
-└── utils/
-    └── plot.py          # 蜡烛图、净值曲线
+├── astock/              # 全部业务源码
+│   ├── api/             # FastAPI 路由、认证、任务和调度
+│   ├── data/            # 数据访问与行情获取代码
+│   ├── trade_run/       # 交易实例、计划和账务
+│   ├── vnpy_runtime/    # vn.py 适配层
+│   ├── analysis/        # 技术指标
+│   ├── factors/         # 因子计算
+│   ├── strategy/        # 策略接口和均线策略
+│   ├── backtest/        # 回测引擎与指标
+│   ├── utils/           # 绘图工具
+│   └── *.py             # 选股、评级、模拟盘和研究模块
+├── examples/            # 回测和 vn.py 示例
+├── scripts/             # 数据准备、迁移和查询命令
+├── tests/               # 单元测试和离线验证
+├── docs/                # API、项目状态和迁移说明
+├── sql/                 # 数据库结构与版本化迁移
+├── config.example.py    # 配置模板
+├── config.py            # 本地配置（自行创建，Git 忽略）
+├── requirements.txt     # 依赖
+├── README.md            # 项目入口说明
+├── AGENTS.md            # 本地协作约定
+└── MEMORY.md            # 本地项目记忆
 ```
 
 ## 多因子选股
@@ -94,15 +125,15 @@ a-stock-analyzer/
 对合格股票生成每日评级快照后选 Top N：
 
 ```bash
-python screen.py --limit 50    # 试跑 50 只
-python screen.py               # 全部主板（~3000 只，首跑 25-40 分钟）
+python -m astock.screen --limit 50    # 试跑 50 只
+python -m astock.screen               # 全部主板（~3000 只，首跑 25-40 分钟）
 ```
 
-输出 `output/picks_YYYYMMDD.csv`。因子权重在 `factors/compute.py` 顶部可调。
+输出 `output/picks_YYYYMMDD.csv`。因子权重在 `astock/factors/compute.py` 顶部可调。
 
 ## 扩展策略
 
-继承 `strategy.base.Strategy`，实现 `generate_signals(df) -> pd.Series`，信号 `1` 买入、`-1` 卖出、`0` 持有。在 `main.py` 替换策略实例即可。
+继承 `astock.strategy.base.Strategy`，实现 `generate_signals(df) -> pd.Series`，信号 `1` 买入、`-1` 卖出、`0` 持有。在 `examples/main.py` 替换策略实例即可。
 
 ## 回测约定
 
@@ -116,12 +147,12 @@ python screen.py               # 全部主板（~3000 只，首跑 25-40 分钟�
 
 ## API 后端（FastAPI）
 
-把研究/选股/回测/模拟盘的全部能力暴露成 HTTP 接口。完整接口文档见 **[API.md](API.md)**。
+把研究/选股/回测/模拟盘的全部能力暴露成 HTTP 接口。完整接口文档见 **[API 文档](docs/API.md)**。
 
 ### 启动
 
 ```bash
-python -m uvicorn api.main:app --host 0.0.0.0 --port 8000
+python -m uvicorn astock.api.main:app --host 0.0.0.0 --port 8000
 # 交互式文档：http://localhost:8000/docs
 ```
 
@@ -196,7 +227,7 @@ curl "http://localhost:8000/api/tasks/history?name=backtest&limit=10"
 
 ### 详细接口文档
 
-每个接口的参数、返回示例、注意事项见 **[API.md](API.md)**，含：
+每个接口的参数、返回示例、注意事项见 **[API 文档](docs/API.md)**，含：
 - 所有 33 个接口的完整说明
 - SSE 前端 JS EventSource 代码示例
 - 异步任务前端轮询模式

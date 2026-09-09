@@ -26,6 +26,11 @@ output/
 
 # 含密钥/token 的本地配置（用 config.example.py 作模板）
 config.py
+# vn.py 配置适配器是源码，不是根目录私有配置。
+!astock/vnpy_runtime/config.py
+
+# 本地保存的 vn.py 源码审阅副本；运行时从 PyPI 安装，不提交该副本。
+astock/vnpy_runtime/vnpy/
 
 # 备份文件
 *.bak

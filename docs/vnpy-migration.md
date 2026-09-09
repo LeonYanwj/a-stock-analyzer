@@ -9,7 +9,7 @@
 不配置券商账号时，可运行本地模拟网关验证 vn.py 的事件和行情链路：
 
 ```bash
-.venv-vnpy/bin/python examples/vnpy_linux_demo.py
+.venv-vnpy/bin/python -m examples.vnpy_linux_demo
 ```
 
 该 demo 使用项目内的 `LocalDemoGateway`，会生成递增的模拟 Tick，不会连接外部服务，也不会下单。需要测试真实期货柜台时再使用官方 `vnpy_ctptest`；A 股实盘仍需另接支持 Linux 的券商接口。
@@ -36,9 +36,47 @@ XT_PATH = ""
   和官方 `EquityDemoStrategy` 异步回测；结果通过 `/api/tasks/{task_id}` 查询
 - `POST /api/vnpy/disconnect`：断开行情 gateway
 
-策略入口为 `vnpy_runtime.strategy.load_equity_demo_strategy()`，对应 vn.py 官方
-`EquityDemoStrategy`。回测入口为 `vnpy_runtime.backtest`，直接调用
-`vnpy.alpha.strategy.BacktestingEngine`。
+策略入口为 `astock.vnpy_runtime.strategy.load_equity_demo_strategy()`，对应 vn.py 官方
+`EquityDemoStrategy`。交易实例候选由
+`astock.vnpy_runtime.signals.generate_alpha101_signals()` 计算：它使用已安装的 vn.py
+`Alpha101` 表达式生成无未来数据的横截面信号，信号格式与 `EquityDemoStrategy` 一致；
+本项目的交易计划层继续负责限仓、整手、人工报价确认和成交审计。
+回测入口为 `astock.vnpy_runtime.backtest`，直接调用 `vnpy.alpha.strategy.BacktestingEngine`。
+
+## 只读选股 Demo
+
+要直接查看 vn.py 根据 Alpha101 排出的候选股票，先在 Python 3.10+ 环境安装依赖：
+
+```bash
+python -m venv .venv-vnpy
+.venv-vnpy/bin/pip install -r requirements.txt
+```
+
+然后运行：
+
+```bash
+.venv-vnpy/bin/python -m examples.vnpy_stock_picker \
+  --strategy medium_term --asset stock --limit 10
+```
+
+该命令从 `config.py` 配置的 MySQL 读取 `market_daily`，默认只使用决策日前的复权日线，
+输出排名、代码、参考价、Alpha 信号分数和有效因子数。可选策略为
+`short_term`、`medium_term`、`long_term`，也可用 `--as-of 2026-09-08` 固定历史截面。
+程序是只读的，不创建交易实例、交易计划，不连接券商，也不会下单。
+
+没有 MySQL 时，可用 CSV 离线验证。CSV 至少包含
+`ts_code,trade_date,open,high,low,close`，成交量列使用 `volume` 或 `vol`：
+
+```bash
+.venv-vnpy/bin/python -m examples.vnpy_stock_picker \
+  --csv data/stocks.csv --strategy short_term --limit 5
+```
+
+CSV 需要至少 3 只标的，并为每只标的准备足够历史日线（当前 Alpha101 最长窗口为 60 个交易日，
+建议准备 120～320 个交易日）。
+
+仓库内的 `astock/vnpy_runtime/vnpy/` 是随项目保存的源码审阅副本，便于核对 Alpha101
+和官方策略实现；部署服务器不需要提交或安装这份副本。
 
 ## 服务器配置
 
@@ -49,6 +87,6 @@ XT_PATH = ""
 
 1. 安装依赖并验证 `/api/vnpy/status`；
 2. 连接迅投并订阅一只股票/ETF，确认 Tick/K 线事件；
-3. 将 vn.py Alpha 信号和回测结果接入前端；
-4. 新链路完成回测和仿真验证后，再下线旧 `screen`、`paper` 和自定义回测链路；
-5. 旧数据库表只读保留，不清理历史数据。
+3. 新建交易实例和独立市场扫描固定使用 vn.py Alpha101 信号；
+4. 通过 vn.py 回测和仿真验证策略表现；
+5. 旧 `legacy/new` 实例和数据库表只读保留，不清理历史数据。

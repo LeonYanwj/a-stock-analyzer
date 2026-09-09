@@ -1,9 +1,9 @@
 import threading
 import unittest
 
-from trade_run.models import TradeRunError
-from trade_run.repository import SqliteTradeRunRepository, _MySqlConnectionAdapter
-from trade_run.service import TradeRunService
+from astock.trade_run.models import TradeRunError
+from astock.trade_run.repository import SqliteTradeRunRepository, _MySqlConnectionAdapter
+from astock.trade_run.service import TradeRunService
 
 
 class _FakeMySqlCursor:
@@ -72,21 +72,25 @@ class TradeRunStateTests(unittest.TestCase):
         self.service.repo.initialize()
 
     def create(self, strategy="short_term"):
-        return self.service.create_run("验证实例", strategy, 100000, 0.8, ["stock", "etf"], signal_source="legacy")
+        return self.service.create_run("验证实例", strategy, 100000, 0.8, ["stock", "etf"], signal_source="vnpy")
 
     def test_create_defaults_to_draft_and_freezes_version(self):
         run = self.create()
         self.assertEqual(run["status"], "draft")
         self.assertEqual(run["initial_capital"], 100000)
-        self.assertEqual(run["frozen_config"]["strategy_version"], 1)
+        self.assertEqual(run["frozen_config"]["strategy_version"], 3)
 
-    def test_primary_signal_source_is_required_and_shadow_is_automatic(self):
+    def test_vnpy_is_default_and_legacy_cannot_create_new_run(self):
+        run = self.service.create_run("vn.py 体系", "short_term", 100000, 0.8, ["stock"])
+        self.assertEqual(run["primary_signal_source"], "vnpy")
+        self.assertEqual(run["shadow_signal_source"], "vnpy_reference")
         with self.assertRaises(TradeRunError) as ctx:
-            self.service.create_run("缺少体系", "short_term", 100000, 0.8, ["stock"])
+            self.service.create_run("旧体系", "short_term", 100000, 0.8, ["stock"], signal_source="legacy")
         self.assertEqual(ctx.exception.code, "SIGNAL_SOURCE_REQUIRED")
-        run = self.service.create_run("新体系", "short_term", 100000, 0.8, ["stock"], signal_source="new")
-        self.assertEqual(run["primary_signal_source"], "new")
-        self.assertEqual(run["shadow_signal_source"], "legacy")
+        with self.assertRaises(TradeRunError) as ctx:
+            self.service.create_run("错误对照", "short_term", 100000, 0.8, ["stock"],
+                                    signal_source="vnpy", shadow_signal_source="new")
+        self.assertEqual(ctx.exception.code, "INVALID_SHADOW_SIGNAL_SOURCE")
 
     def test_pause_requires_explicit_restart(self):
         run = self.create()

@@ -1,15 +1,15 @@
 import unittest
 
-from trade_run.models import TradeRunError
-from trade_run.repository import SqliteTradeRunRepository
-from trade_run.service import TradeRunService
+from astock.trade_run.models import TradeRunError
+from astock.trade_run.repository import SqliteTradeRunRepository
+from astock.trade_run.service import TradeRunService
 
 
 class TradeRunAccountingTests(unittest.TestCase):
     def setUp(self):
         self.service = TradeRunService(SqliteTradeRunRepository())
         self.service.repo.initialize()
-        self.run = self.service.create_run("短线验证", "short_term", 100000, 0.8, ["stock"], signal_source="legacy")
+        self.run = self.service.create_run("短线验证", "short_term", 100000, 0.8, ["stock"], signal_source="vnpy")
         self.service.start_run(self.run["run_id"])
 
     def plan(self, **changes):
@@ -104,7 +104,7 @@ class TradeRunAccountingTests(unittest.TestCase):
         repo = LockTrackingRepo()
         repo.initialize()
         service = TradeRunService(repo)
-        run = service.create_run("锁验证", "short_term", 100000, 0.8, ["stock"], signal_source="legacy")
+        run = service.create_run("锁验证", "short_term", 100000, 0.8, ["stock"], signal_source="vnpy")
         service.start_run(run["run_id"])
         service.record_fill(run["run_id"], idempotency_key="lock-fill", ts_code="600000.SH", side="buy", qty=1000, price=10, fee=5, executed_at="2026-08-13T09:35:00", asset_type="stock", broker_quote_confirmed=True, quote_checked_at="2026-08-13T09:34:00")
         self.assertGreaterEqual(repo.lock_requests, 2)

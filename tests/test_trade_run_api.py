@@ -8,16 +8,16 @@ import os
 
 try:
     from fastapi.testclient import TestClient
-    from api import auth
-    from api.routes.trade_runs import configure_service
-    from api.main import app
+    from astock.api import auth
+    from astock.api.routes.trade_runs import configure_service
+    from astock.api.main import app
     FASTAPI_AVAILABLE = True
 except ImportError:
     FASTAPI_AVAILABLE = False
 
-from trade_run.repository import SqliteTradeRunRepository
-from trade_run.service import TradeRunService
-from api.passwords import hash_password
+from astock.trade_run.repository import SqliteTradeRunRepository
+from astock.trade_run.service import TradeRunService
+from astock.api.passwords import hash_password
 
 
 @unittest.skipUnless(FASTAPI_AVAILABLE, "当前解释器未安装 FastAPI/Pydantic")
@@ -41,7 +41,7 @@ class TradeRunApiTests(unittest.TestCase):
     def test_create_start_fill_and_dashboard_contract(self):
         created = self.client.post("/api/trade-runs", headers=self.headers, json={
             "name": "API 验证", "strategy_code": "short_term", "capital": 100000,
-            "max_position_pct": 0.8, "asset_types": ["stock"], "signal_source": "legacy",
+            "max_position_pct": 0.8, "asset_types": ["stock"], "signal_source": "vnpy",
         })
         self.assertEqual(created.status_code, 200)
         run_id = created.json()["run_id"]
@@ -60,7 +60,7 @@ class TradeRunApiTests(unittest.TestCase):
     def test_deleted_run_returns_structured_error(self):
         created = self.client.post("/api/trade-runs", headers=self.headers, json={
             "name": "删除验证", "strategy_code": "medium_term", "capital": 100000,
-            "max_position_pct": 0.8, "asset_types": ["etf"], "signal_source": "legacy",
+            "max_position_pct": 0.8, "asset_types": ["etf"], "signal_source": "vnpy",
         }).json()
         run_id = created["run_id"]
         self.assertEqual(self.client.delete(f"/api/trade-runs/{run_id}", headers=self.headers).status_code, 200)

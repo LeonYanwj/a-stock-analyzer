@@ -5,7 +5,7 @@
 import unittest
 from datetime import date
 
-from api.etf_history import (build_history_window, normalize_etf_code,
+from astock.api.etf_history import (build_history_window, normalize_etf_code,
                              run_etf_history_sync)
 
 

@@ -1,6 +1,6 @@
 import unittest
 
-from api.passwords import hash_password, verify_password
+from astock.api.passwords import hash_password, verify_password
 
 
 class AdminPasswordTests(unittest.TestCase):

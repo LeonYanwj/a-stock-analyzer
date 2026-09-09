@@ -14,7 +14,7 @@ from config import DB_HOST, DB_PORT, DB_USER, DB_PASSWORD, DB_NAME
 
 def main():
     if len(sys.argv) != 4:
-        raise SystemExit("用法: run_mysql_migration.py <migration_id> <checksum> <description>")
+        raise SystemExit("用法: python -m scripts.run_mysql_migration <migration_id> <checksum> <description>")
 
     migration_id, expected_checksum, description = sys.argv[1:]
     sql = sys.stdin.read()

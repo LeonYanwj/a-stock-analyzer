@@ -1,9 +1,9 @@
 import unittest
 from datetime import datetime
 
-from trade_run.planner import TradeRunPlanner
-from trade_run.repository import SqliteTradeRunRepository
-from trade_run.service import TradeRunService
+from astock.trade_run.planner import TradeRunPlanner
+from astock.trade_run.repository import SqliteTradeRunRepository
+from astock.trade_run.service import TradeRunService
 
 
 class FixedProvider:
@@ -20,7 +20,7 @@ class TradeRunPlannerTests(unittest.TestCase):
         repo.initialize()
         self.service = TradeRunService(repo)
         self.run = self.service.create_run("计划验证", "short_term", 100000, .8,
-                                           ["stock", "etf"], signal_source="legacy")
+                                           ["stock", "etf"], signal_source="vnpy")
         self.service.start_run(self.run["run_id"])
         self.as_of = datetime(2026, 8, 13, 8, 50)
 
@@ -31,8 +31,8 @@ class TradeRunPlannerTests(unittest.TestCase):
 
     def test_primary_shadow_overlap_and_idempotent_window(self):
         planner = TradeRunPlanner(self.service, {
-            "legacy": FixedProvider([self.row("600000.SH"), self.row("510300.SH", "etf")]),
-            "new": FixedProvider([self.row("600000.SH"), self.row("600519.SH")]),
+            "vnpy": FixedProvider([self.row("600000.SH"), self.row("510300.SH", "etf")]),
+            "vnpy_reference": FixedProvider([self.row("600000.SH"), self.row("600519.SH")]),
         })
         result = planner.generate(self.run["run_id"], "pre_market", self.as_of)
         self.assertFalse(result["idempotent"])
@@ -74,7 +74,7 @@ class TradeRunPlannerTests(unittest.TestCase):
             def candidates(self, *args):
                 raise RuntimeError("data unavailable")
 
-        planner = TradeRunPlanner(self.service, {"legacy": BrokenProvider(), "new": BrokenProvider()})
+        planner = TradeRunPlanner(self.service, {"vnpy": BrokenProvider(), "vnpy_reference": BrokenProvider()})
         with self.assertRaises(Exception):
             planner.generate(self.run["run_id"], "midday", self.as_of)
         events = self.service.repo._many(self.service.repo.conn.execute("SELECT * FROM risk_event"))
@@ -86,12 +86,12 @@ class TradeRunPlannerTests(unittest.TestCase):
                 raise RuntimeError("data unavailable")
 
         with self.assertRaises(Exception):
-            TradeRunPlanner(self.service, {"legacy": BrokenProvider(), "new": BrokenProvider()}).generate(
+            TradeRunPlanner(self.service, {"vnpy": BrokenProvider(), "vnpy_reference": BrokenProvider()}).generate(
                 self.run["run_id"], "midday", self.as_of
             )
         recovered = TradeRunPlanner(self.service, {
-            "legacy": FixedProvider([self.row("600000.SH")]),
-            "new": FixedProvider([self.row("600519.SH")]),
+            "vnpy": FixedProvider([self.row("600000.SH")]),
+            "vnpy_reference": FixedProvider([self.row("600519.SH")]),
         }).generate(self.run["run_id"], "midday", self.as_of)
         self.assertFalse(recovered["idempotent"])
         self.assertEqual(len(self.service.list_plans(self.run["run_id"])), 2)
@@ -109,7 +109,7 @@ class TradeRunPlannerTests(unittest.TestCase):
                 self.run_id = run_id
 
         planner = TradeRunPlanner(self.service, {
-            "legacy": PausingProvider(self.run["run_id"]), "new": FixedProvider([self.row("600519.SH")]),
+            "vnpy": PausingProvider(self.run["run_id"]), "vnpy_reference": FixedProvider([self.row("600519.SH")]),
         })
         with self.assertRaises(Exception) as ctx:
             planner.generate(self.run["run_id"], "midday", self.as_of)
@@ -118,7 +118,7 @@ class TradeRunPlannerTests(unittest.TestCase):
 
     def test_empty_window_is_idempotent(self):
         planner = TradeRunPlanner(self.service, {
-            "legacy": FixedProvider([]), "new": FixedProvider([]),
+            "vnpy": FixedProvider([]), "vnpy_reference": FixedProvider([]),
         })
         first = planner.generate(self.run["run_id"], "pre_market", self.as_of)
         second = planner.generate(self.run["run_id"], "pre_market", self.as_of)
@@ -138,9 +138,76 @@ class TradeRunPlannerTests(unittest.TestCase):
                     return Cursor()
             conn = Connection()
 
-        from trade_run.signal_providers import RuleSignalProvider
+        from astock.trade_run.signal_providers import RuleSignalProvider
         provider = RuleSignalProvider(QueryRepo())
         provider._daily_candidates("market_daily", "stock", self.as_of, 10)
         sql, params = captured[0]
         self.assertNotIn("LIKE '600%'", sql)
         self.assertEqual(params, ("600%", "601%", "603%", "605%", "000%", "001%", "002%", "2026-08-12"))
+
+    def test_vnpy_provider_uses_prior_day_bars_and_converts_vt_symbols(self):
+        captured = []
+
+        class QueryRepo:
+            class Connection:
+                def execute(self, sql, params):
+                    captured.append((sql, params))
+
+                    class Cursor:
+                        def fetchall(self):
+                            return [{
+                                "ts_code": "600000.SH", "trade_date": "2026-08-12",
+                                "open": 10, "high": 11, "low": 9, "close": 10.5,
+                                "vol": 1000, "amount": 10500,
+                            }]
+                    return Cursor()
+            conn = Connection()
+
+        from unittest.mock import patch
+        from astock.trade_run.signal_providers import VnpyAlphaSignalProvider
+
+        provider = VnpyAlphaSignalProvider(QueryRepo())
+        with patch("astock.vnpy_runtime.signals.generate_alpha101_signals", return_value=[{
+            "vt_symbol": "600000.SSE", "close": 10.5, "signal": 0.8, "factor_count": 5,
+        }]):
+            rows = provider._stock_candidates({"strategy_code": "short_term"}, self.as_of)
+
+        sql, params = captured[0]
+        self.assertIn("d.trade_date<=?", sql)
+        self.assertEqual(params[0], "2026-08-12")
+        self.assertEqual(rows[0]["ts_code"], "600000.SH")
+        self.assertEqual(rows[0]["data_source"], "vnpy_alpha101")
+
+    def test_vnpy_provider_uses_whitelisted_etf_bars(self):
+        captured = []
+
+        class QueryRepo:
+            class Connection:
+                def execute(self, sql, params):
+                    captured.append((sql, params))
+
+                    class Cursor:
+                        def fetchall(self):
+                            return [{
+                                "ts_code": "510300.SH", "trade_date": "2026-08-12",
+                                "open": 4, "high": 4.1, "low": 3.9, "close": 4.05,
+                                "vol": 1000, "amount": 4050,
+                            }]
+                    return Cursor()
+            conn = Connection()
+
+        from unittest.mock import patch
+        from astock.trade_run.signal_providers import VnpyAlphaSignalProvider
+
+        provider = VnpyAlphaSignalProvider(QueryRepo())
+        with patch("astock.vnpy_runtime.signals.generate_alpha101_signals", return_value=[{
+            "vt_symbol": "510300.SSE", "close": 4.05, "signal": 0.8, "factor_count": 5,
+        }]):
+            rows = provider._etf_candidates({"strategy_code": "medium_term"}, self.as_of)
+
+        sql, params = captured[0]
+        self.assertIn("market_etf_basic", sql)
+        self.assertIn("b.whitelist=?", sql)
+        self.assertEqual(params[:3], ("2026-08-12", "active", 1))
+        self.assertEqual(rows[0]["asset_type"], "etf")
+        self.assertEqual(rows[0]["ts_code"], "510300.SH")
