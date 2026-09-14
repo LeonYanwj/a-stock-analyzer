@@ -110,6 +110,9 @@ class SqliteTradeRunRepository:
             ("short_term", "短线", "1-3 个交易日的盘中条件计划", "short-v1"),
             ("medium_term", "中线", "1-4 周趋势与行业强度计划", "medium-v1"),
             ("long_term", "长线", "1-3 个月低换手趋势计划", "long-v1"),
+            ("trend_momentum", "趋势动量", "收盘价、均线和动量共同确认的只读选股", "rule-trend-momentum-v1"),
+            ("breakout_volume", "突破放量", "突破阶段高点且成交量配合的只读选股", "rule-breakout-volume-v1"),
+            ("low_volatility", "低波动趋势", "正动量、均线向上且波动较低的只读选股", "rule-low-volatility-v1"),
         ]
         for code, name, desc, fingerprint in seeds:
             self.conn.execute("INSERT OR IGNORE INTO strategy_definition VALUES (?,?,?)", (code, name, desc))
@@ -419,6 +422,9 @@ class MySqlTradeRunRepository(SqliteTradeRunRepository):
                 ("short_term", "短线", "1-3 个交易日的盘中条件计划", "short-v1"),
                 ("medium_term", "中线", "1-4 周趋势与行业强度计划", "medium-v1"),
                 ("long_term", "长线", "1-3 个月低换手趋势计划", "long-v1"),
+                ("trend_momentum", "趋势动量", "收盘价、均线和动量共同确认的只读选股", "rule-trend-momentum-v1"),
+                ("breakout_volume", "突破放量", "突破阶段高点且成交量配合的只读选股", "rule-breakout-volume-v1"),
+                ("low_volatility", "低波动趋势", "正动量、均线向上且波动较低的只读选股", "rule-low-volatility-v1"),
             ]:
                 self.conn.execute("INSERT IGNORE INTO strategy_definition(code,name,description) VALUES (?,?,?)", (code, name, description))
                 self.conn.execute("INSERT IGNORE INTO strategy_version(strategy_code,version_no,algorithm_fingerprint,config_json,signal_source,created_at) VALUES (?,?,?,JSON_OBJECT(),?,?)", (code, 1, fingerprint, "legacy", now))

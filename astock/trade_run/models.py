@@ -25,7 +25,15 @@ class Side(str, Enum):
     SELL = "sell"
 
 
-STRATEGY_CODES = {"short_term", "medium_term", "long_term"}
+STRATEGY_CODES = {
+    "trend_momentum",
+    "breakout_volume",
+    "low_volatility",
+    # 旧代码保留用于读取历史实例；新扫描默认使用上面的规则策略。
+    "short_term",
+    "medium_term",
+    "long_term",
+}
 ASSET_TYPES = {"stock", "etf"}
 # ``legacy`` 和 ``new`` 仅用于读取已冻结的历史实例；新实例只能选择 vn.py。
 SIGNAL_SOURCES = {"legacy", "new", "vnpy", "vnpy_reference"}

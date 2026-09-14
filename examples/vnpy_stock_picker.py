@@ -24,6 +24,7 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from astock.vnpy_runtime.signals import VnpyAlphaSignalError, generate_alpha101_signals
+from astock.vnpy_runtime.rules import DEFAULT_RULE_STRATEGIES, generate_rule_signals
 
 
 def _parse_as_of(value: str) -> datetime:
@@ -110,7 +111,9 @@ def _file_candidates(rows: list[dict[str, Any]], strategy: str, asset: str, limi
 
     output = []
     for kind, group in groups:
-        signals = generate_alpha101_signals(group, strategy)
+        signals = (generate_rule_signals(group, strategy)
+                    if strategy in DEFAULT_RULE_STRATEGIES
+                    else generate_alpha101_signals(group, strategy))
         for item in signals[:limit]:
             symbol, exchange = str(item["vt_symbol"]).rsplit(".", 1)
             ts_code = f"{symbol}.{'SH' if exchange == 'SSE' else 'SZ' if exchange == 'SZSE' else exchange}"
@@ -142,7 +145,7 @@ def _print_candidates(rows: list[dict[str, Any]], strategy: str, source: str, li
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="使用项目内 vn.py Alpha101 做只读横截面选股")
-    parser.add_argument("--strategy", choices=("short_term", "medium_term", "long_term"), default="medium_term")
+    parser.add_argument("--strategy", choices=tuple(DEFAULT_RULE_STRATEGIES) + ("short_term", "medium_term", "long_term"), default="trend_momentum")
     parser.add_argument("--asset", choices=("stock", "etf", "all"), default="stock")
     parser.add_argument("--as-of", type=_parse_as_of, help="决策日期；只使用此前的日线，默认使用当前日期")
     parser.add_argument("--limit", type=int, default=10)

@@ -21,6 +21,17 @@ pip install -r requirements.txt
 
 看到连续的 `TICK 000001.SZSE` 和最后的 `OK` 即表示 vn.py 事件引擎、网关和订阅链路正常。这个 demo 只生成模拟行情，不代表 A 股真实行情。
 
+第一里程碑验收优先运行下面的真实选股 Demo。它会只读连接 `config.py` 配置的 MySQL，
+读取 `market_daily` 中的真实 A 股日线，通过生产信号链调用 vn.py Alpha101 并输出候选排名。
+它不需要迅投 Token 或券商账号，不写数据库，也不会创建计划或下单。
+
+```bash
+.venv-vnpy/bin/python -m examples.vnpy_milestone_demo
+```
+
+最终看到 `MILESTONE DEMO OK` 表示已经使用真实行情跑通 vn.py Alpha101 选股。
+若只需验证事件引擎和模拟网关，继续使用前面的 `examples.vnpy_linux_demo`。
+
 ```python
 XTPY_MODE = "token"
 XT_TOKEN = "你的迅投接口Token"
@@ -91,7 +102,7 @@ python -m examples.main
 完整测试可使用 `python -m unittest discover -s tests -t .`；两个 Mock 流程仍按上表单独运行。
 安装完整依赖需要 Python 3.10 或以上。API 启动命令已改为 `python -m uvicorn astock.api.main:app`。
 行情缓存和运行输出仍使用项目根目录的 `cache/`、`output/`、`data/vnpy_lab/`，其中 `astock/data/` 仅存放 Python 源码。
-项目进展见 [项目状态](docs/PROJECT_STATUS.md)，接口说明见 [API 文档](docs/API.md)。
+项目进展见 [项目状态](docs/PROJECT_STATUS.md)，接口说明统一见 [API 文档](API.md)。API 文档顶部的“第一阶段已修改”标记列出了快速/全局扫描和默认规则策略的改动。
 
 ```text
 a-stock-analyzer/

@@ -66,12 +66,13 @@ class VnpyAlphaSignalProvider:
                 "open": row["open"], "high": row["high"], "low": row["low"],
                 "close": row["close"], "volume": row["vol"], "amount": row["amount"],
             })
+        bars = _apply_stock_scope(bars, run)
         try:
             from astock.vnpy_runtime.signals import (
                 VnpyAlphaSignalError,
                 generate_alpha101_signals,
             )
-            signals = generate_alpha101_signals(bars, run["strategy_code"], self.reference)
+            signals = _generate_signals(bars, run["strategy_code"], self.reference)
         except VnpyAlphaSignalError as exc:
             raise SignalProviderError(str(exc)) from exc
         return self._candidate_rows(signals, "stock", as_of)
@@ -100,18 +101,8 @@ class VnpyAlphaSignalProvider:
                 "open": row["open"], "high": row["high"], "low": row["low"],
                 "close": row["close"], "volume": row["vol"], "amount": row["amount"],
             })
-        signals = self._generate_signals(bars, run["strategy_code"])
+        signals = _generate_signals(bars, run["strategy_code"], self.reference)
         return self._candidate_rows(signals, "etf", as_of)
-
-    def _generate_signals(self, bars, strategy_code):
-        try:
-            from astock.vnpy_runtime.signals import (
-                VnpyAlphaSignalError,
-                generate_alpha101_signals,
-            )
-            return generate_alpha101_signals(bars, strategy_code, self.reference)
-        except VnpyAlphaSignalError as exc:
-            raise SignalProviderError(str(exc)) from exc
 
     def _candidate_rows(self, signals, asset_type, as_of):
         output = []
@@ -124,7 +115,7 @@ class VnpyAlphaSignalProvider:
                 "side": "buy",
                 "reference_price": item["close"],
                 "score": item["signal"],
-                "reason": f"vn.py Alpha101 横截面信号入选（{item['factor_count']} 个因子）",
+                "reason": item.get("reason") or f"vn.py Alpha101 横截面信号入选（{item['factor_count']} 个因子）",
                 "data_status": "delayed",
                 "data_source": "vnpy_alpha101_reference" if self.reference else "vnpy_alpha101",
                 "market_time": as_of,
@@ -135,6 +126,36 @@ class VnpyAlphaSignalProvider:
 def _to_ts_code(vt_symbol):
     symbol, exchange = vt_symbol.rsplit(".", 1)
     return f"{symbol}.{'SH' if exchange == 'SSE' else 'SZ' if exchange == 'SZSE' else exchange}"
+
+
+def _apply_stock_scope(bars, run):
+    """快速扫描先按最新成交额保留股票，full 扫描保留全部股票。"""
+    if str(run.get("stock_scope", "quick")).lower() == "full":
+        return bars
+    limit = int(run.get("quick_limit") or 100)
+    latest = {}
+    for row in bars:
+        code = row["ts_code"]
+        previous = latest.get(code)
+        if previous is None or str(row["trade_date"]) > str(previous["trade_date"]):
+            latest[code] = row
+    selected = {
+        code for code, _ in sorted(
+            latest.items(), key=lambda item: float(item[1].get("amount") or 0), reverse=True
+        )[:limit]
+    }
+    return [row for row in bars if row["ts_code"] in selected]
+
+
+def _generate_signals(bars, strategy_code, reference=False):
+    try:
+        if strategy_code in {"trend_momentum", "breakout_volume", "low_volatility"}:
+            from astock.vnpy_runtime.rules import generate_rule_signals
+            return generate_rule_signals(bars, strategy_code)
+        from astock.vnpy_runtime.signals import generate_alpha101_signals
+        return generate_alpha101_signals(bars, strategy_code, reference)
+    except Exception as exc:
+        raise SignalProviderError(str(exc)) from exc
 
 
 class LegacySignalProvider:

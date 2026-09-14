@@ -13,6 +13,17 @@
 ```
 
 该 demo 使用项目内的 `LocalDemoGateway`，会生成递增的模拟 Tick，不会连接外部服务，也不会下单。需要测试真实期货柜台时再使用官方 `vnpy_ctptest`；A 股实盘仍需另接支持 Linux 的券商接口。
+
+第一里程碑的完整验收 Demo 会只读连接项目 MySQL，使用 `market_daily` 的真实 A 股日线
+调用生产信号链和 vn.py Alpha101，并输出数据截面、股票池覆盖及候选排名：
+
+```bash
+.venv-vnpy/bin/python -m examples.vnpy_milestone_demo
+```
+
+该命令读取 `config.py` 中的数据库配置，但不读取迅投 Token，不写业务数据、不会下单。
+最终输出 `MILESTONE DEMO OK` 才表示真实行情选股链路已通过；前面的模拟 Tick Demo
+只用于排查 vn.py 事件引擎和网关环境。
 迅投配置统一放在项目根目录的 `config.py`（该文件已被 Git 忽略）：
 
 ```python
@@ -74,6 +85,11 @@ python -m venv .venv-vnpy
 
 CSV 需要至少 3 只标的，并为每只标的准备足够历史日线（当前 Alpha101 最长窗口为 60 个交易日，
 建议准备 120～320 个交易日）。
+
+第一阶段市场扫描提供三个默认规则：`trend_momentum`（趋势动量）、
+`breakout_volume`（突破放量）和 `low_volatility`（低波动趋势）。扫描支持
+`stock_scope=quick`（先按最新成交额缩小股票池）和 `stock_scope=full`（全部合格主板），
+两种模式都只返回候选，不操作账户或仓位。
 
 仓库内的 `astock/vnpy_runtime/vnpy/` 是随项目保存的源码审阅副本，便于核对 Alpha101
 和官方策略实现；部署服务器不需要提交或安装这份副本。
