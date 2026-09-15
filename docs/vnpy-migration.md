@@ -14,14 +14,17 @@
 
 该 demo 使用项目内的 `LocalDemoGateway`，会生成递增的模拟 Tick，不会连接外部服务，也不会下单。需要测试真实期货柜台时再使用官方 `vnpy_ctptest`；A 股实盘仍需另接支持 Linux 的券商接口。
 
-第一里程碑的完整验收 Demo 会只读连接项目 MySQL，使用 `market_daily` 的真实 A 股日线
-调用生产信号链和 vn.py Alpha101，并输出数据截面、股票池覆盖及候选排名：
+第一里程碑的完整验收 Demo 默认只读检查项目 MySQL 的 `market_daily`；行情不足时对
+当前截面从 AKShare/东方财富按需获取真实日线，再调用 vn.py Alpha101，并输出数据截面、
+实际有效股票数量及候选排名：
 
 ```bash
 .venv-vnpy/bin/python -m examples.vnpy_milestone_demo
 ```
 
-该命令读取 `config.py` 中的数据库配置，但不读取迅投 Token，不写业务数据、不会下单。
+可用 `--data-source mysql` 禁止回退，或用 `--data-source akshare --quick-limit 50` 跳过 MySQL。
+AKShare 路径不写业务数据、不会下单，也不读取迅投 Token；历史 `--as-of` 不自动回退到
+今天的股票池，`full` 全市场扫描需先批量准备 MySQL 行情。
 最终输出 `MILESTONE DEMO OK` 才表示真实行情选股链路已通过；前面的模拟 Tick Demo
 只用于排查 vn.py 事件引擎和网关环境。
 迅投配置统一放在项目根目录的 `config.py`（该文件已被 Git 忽略）：

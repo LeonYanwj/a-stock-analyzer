@@ -21,13 +21,17 @@ pip install -r requirements.txt
 
 看到连续的 `TICK 000001.SZSE` 和最后的 `OK` 即表示 vn.py 事件引擎、网关和订阅链路正常。这个 demo 只生成模拟行情，不代表 A 股真实行情。
 
-第一里程碑验收优先运行下面的真实选股 Demo。它会只读连接 `config.py` 配置的 MySQL，
-读取 `market_daily` 中的真实 A 股日线，通过生产信号链调用 vn.py Alpha101 并输出候选排名。
-它不需要迅投 Token 或券商账号，不写数据库，也不会创建计划或下单。
+第一里程碑验收优先运行下面的真实选股 Demo。默认先只读检查 MySQL 行情；若股票池或
+日线覆盖不足，则对当前截面从 AKShare/东方财富按需获取真实 A 股日线，调用 vn.py
+Alpha101 并输出候选排名。它不需要迅投 Token 或券商账号，不写数据库，也不会创建计划或下单。
 
 ```bash
 .venv-vnpy/bin/python -m examples.vnpy_milestone_demo
 ```
+
+数据库为空时可指定 `--data-source akshare --stock-scope quick --quick-limit 50`，此路径只适合
+当前截面；历史 `--as-of` 必须先在 MySQL 准备对应日线，避免用今天的股票池回看过去。
+`full` 全市场扫描仍需预先批量准备行情，不会在单次 Demo 中逐只即时请求数千只股票。
 
 最终看到 `MILESTONE DEMO OK` 表示已经使用真实行情跑通 vn.py Alpha101 选股。
 若只需验证事件引擎和模拟网关，继续使用前面的 `examples.vnpy_linux_demo`。
